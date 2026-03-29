@@ -285,12 +285,53 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	h.store.Set(userToken.Username, userToken)
 
-	// Register webhooks for user's repositories
-	go h.registerWebhooks(userToken)
+	// Register webhooks synchronously to check for permission issues
+	result := h.registerWebhooksWithResult(userToken)
 
-	// Show success page
+	// Show success page with permission warnings if needed
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `
+
+	if result.HasScopeError {
+		fmt.Fprintf(w, `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>授权成功 - 权限不足</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 80px auto; padding: 20px; text-align: center; }
+        .warning { color: #f59e0b; font-size: 64px; }
+        h1 { color: #1f2937; }
+        .info { background: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .error-box { background: #fef3c7; border: 1px solid #f59e0b; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .error-box h2 { color: #b45309; margin: 0 0 12px 0; }
+        .error-box p { color: #92400e; margin: 8px 0; font-size: 14px; }
+        .error-box ul { color: #92400e; margin: 8px 0; padding-left: 20px; font-size: 14px; }
+        a { color: #3b82f6; }
+        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="warning">⚠</div>
+    <h1>授权成功，但权限不足</h1>
+    <div class="info">
+        <p><strong>用户:</strong> %s</p>
+    </div>
+    <div class="error-box">
+        <h2>权限问题</h2>
+        <p>Webhook 注册失败，需要以下权限：</p>
+        <ul>
+            <li><code>write:user</code> - 注册用户级 Webhook</li>
+            <li><code>write:organization</code> - 注册组织级 Webhook</li>
+        </ul>
+        <p><strong>解决方法：</strong></p>
+        <p>请在 Gitea 中撤销此应用的授权，然后重新授权。</p>
+    </div>
+    <p><a href="/oauth/start">重新授权</a> | <a href="/">返回首页</a></p>
+</body>
+</html>
+`, userToken.Username)
+	} else {
+		fmt.Fprintf(w, `
 <!DOCTYPE html>
 <html>
 <head>
@@ -300,6 +341,8 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
         .success { color: #22c55e; font-size: 64px; }
         h1 { color: #1f2937; }
         .info { background: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .status { background: #dbeafe; border: 1px solid #3b82f6; padding: 16px; border-radius: 8px; margin: 16px 0; }
+        .status p { margin: 4px 0; color: #1e40af; }
         a { color: #3b82f6; }
     </style>
 </head>
@@ -308,13 +351,22 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
     <h1>授权成功！</h1>
     <div class="info">
         <p><strong>用户:</strong> %s</p>
-        <p>正在自动注册 Webhook...</p>
+    </div>
+    <div class="status">
+        <p>✓ 用户级 Webhook 已注册</p>
+        %s
     </div>
     <p>现在你可以推送代码到 <code>gh-pages</code> 分支来自动部署你的网站了。</p>
-    <p><a href="/">返回首页</a></p>
+    <p><a href="/">返回首页</a> | <a href="/status">查看状态</a></p>
 </body>
 </html>
-`, userToken.Username)
+`, userToken.Username, func() string {
+			if result.OrgsFound > 0 {
+				return fmt.Sprintf("<p>✓ 组织级 Webhook 已注册 (%d 个组织)</p>", result.OrgsFound)
+			}
+			return "<p>暂无组织</p>"
+		}())
+	}
 }
 
 // OAuthTokenResponse represents the token response
@@ -426,9 +478,26 @@ func min(a, b int) int {
 	return b
 }
 
+// WebhookRegistrationResult holds the result of webhook registration
+type WebhookRegistrationResult struct {
+	UserWebhookError  string
+	OrgWebhookErrors  []string
+	OrgsFound         int
+	HasScopeError     bool
+}
+
 // registerWebhooks registers webhooks at user level and organization level
 func (h *OAuthHandler) registerWebhooks(userToken *UserToken) {
+	result := h.registerWebhooksWithResult(userToken)
+	if result.HasScopeError {
+		log.Printf("Warning: Scope permission issue detected for %s", userToken.Username)
+	}
+}
+
+// registerWebhooksWithResult registers webhooks and returns the result
+func (h *OAuthHandler) registerWebhooksWithResult(userToken *UserToken) *WebhookRegistrationResult {
 	log.Printf("Registering webhooks for: %s", userToken.Username)
+	result := &WebhookRegistrationResult{}
 
 	// 1. Register user-level webhook (covers all user's personal repos)
 	err := h.registerUserWebhook(userToken.AccessToken)
@@ -437,6 +506,10 @@ func (h *OAuthHandler) registerWebhooks(userToken *UserToken) {
 			log.Printf("User-level webhook already exists for %s", userToken.Username)
 		} else {
 			log.Printf("Failed to register user-level webhook for %s: %v", userToken.Username, err)
+			result.UserWebhookError = err.Error()
+			if strings.Contains(err.Error(), "scope") || strings.Contains(err.Error(), "权限") {
+				result.HasScopeError = true
+			}
 		}
 	} else {
 		log.Printf("User-level webhook registered for %s", userToken.Username)
@@ -446,8 +519,14 @@ func (h *OAuthHandler) registerWebhooks(userToken *UserToken) {
 	orgs, err := h.getUserOrganizations(userToken.AccessToken)
 	if err != nil {
 		log.Printf("Failed to get organizations for %s: %v", userToken.Username, err)
-		return
+		result.OrgWebhookErrors = append(result.OrgWebhookErrors, "获取组织列表失败: "+err.Error())
+		if strings.Contains(err.Error(), "scope") || strings.Contains(err.Error(), "权限") {
+			result.HasScopeError = true
+		}
+		return result
 	}
+
+	result.OrgsFound = len(orgs)
 
 	if len(orgs) > 0 {
 		log.Printf("Found %d organizations for %s", len(orgs), userToken.Username)
@@ -458,12 +537,18 @@ func (h *OAuthHandler) registerWebhooks(userToken *UserToken) {
 					log.Printf("Organization webhook already exists for %s", org)
 				} else {
 					log.Printf("Failed to register org webhook for %s: %v", org, err)
+					result.OrgWebhookErrors = append(result.OrgWebhookErrors, org+": "+err.Error())
+					if strings.Contains(err.Error(), "scope") || strings.Contains(err.Error(), "权限") {
+						result.HasScopeError = true
+					}
 				}
 			} else {
 				log.Printf("Organization webhook registered for %s", org)
 			}
 		}
 	}
+
+	return result
 }
 
 // getUserOrganizations fetches organizations the user belongs to
