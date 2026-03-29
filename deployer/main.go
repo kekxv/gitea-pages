@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,13 @@ type Config struct {
 	GiteaAccessToken string
 	GiteaAPIURL      string
 	GiteaSSHKeyPath  string
+
+	// OAuth2 configuration
+	OAuthClientID     string
+	OAuthClientSecret string
+	OAuthRedirectURL  string
+	WebhookPublicURL  string // URL that Gitea can reach for webhooks
+	GiteaPublicURL    string // URL that user's browser can reach Gitea
 }
 
 // LoadConfig reads configuration from environment variables
@@ -46,6 +54,13 @@ func LoadConfig() (*Config, error) {
 		GiteaAccessToken: os.Getenv("GITEA_ACCESS_TOKEN"),
 		GiteaAPIURL:      getEnvOrDefault("GITEA_API_URL", ""),
 		GiteaSSHKeyPath:  getEnvOrDefault("GITEA_SSH_KEY_PATH", ""),
+
+		// OAuth2
+		OAuthClientID:     os.Getenv("OAUTH_CLIENT_ID"),
+		OAuthClientSecret: os.Getenv("OAUTH_CLIENT_SECRET"),
+		OAuthRedirectURL:  os.Getenv("OAUTH_REDIRECT_URL"),
+		WebhookPublicURL:  os.Getenv("WEBHOOK_PUBLIC_URL"),
+		GiteaPublicURL:    os.Getenv("GITEA_PUBLIC_URL"),
 	}, nil
 }
 
@@ -70,10 +85,70 @@ func main() {
 	// Initialize deployer
 	deployer := NewDeployer(config)
 
+	// Initialize token store for OAuth
+	tokenStore := NewTokenStore()
+
+	// Connect token store to deployer for private repo access
+	deployer.SetTokenStore(tokenStore)
+
+	// Initialize web handler
+	webHandler := NewWebHandler(nil, tokenStore, config.Domain)
+
+	// Initialize OAuth handler if configured
+	var oauthHandler *OAuthHandler
+	if config.OAuthClientID != "" && config.GiteaAPIURL != "" {
+		// Use GiteaPublicURL for browser redirects, GiteaAPIURL for internal API calls
+		publicURL := config.GiteaPublicURL
+		if publicURL == "" {
+			publicURL = config.GiteaAPIURL // fallback to internal URL
+		}
+
+		oauthConfig := &OAuthConfig{
+			ClientID:        config.OAuthClientID,
+			ClientSecret:    config.OAuthClientSecret,
+			RedirectURL:     config.OAuthRedirectURL,
+			AuthURL:         strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
+			TokenURL:        strings.TrimSuffix(config.GiteaAPIURL, "/") + "/login/oauth/access_token",
+			APIURL:          config.GiteaAPIURL,
+			PublicAuthURL:   strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
+		}
+
+		// Use WebhookPublicURL if set, otherwise derive from redirect URL
+		webhookURL := config.WebhookPublicURL
+		if webhookURL == "" {
+			webhookURL = "http://deployer:8080/webhook"
+			if config.OAuthRedirectURL != "" {
+				// Derive webhook URL from redirect URL for external access
+				parts := strings.Split(config.OAuthRedirectURL, "/")
+				if len(parts) >= 3 {
+					webhookURL = parts[0] + "//" + parts[2] + "/webhook"
+				}
+			}
+		}
+
+		log.Printf("OAuth Auth URL (browser): %s", oauthConfig.PublicAuthURL)
+		log.Printf("OAuth Token URL (internal): %s", oauthConfig.TokenURL)
+		log.Printf("Webhook URL for OAuth registrations: %s", webhookURL)
+
+		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, config.WebhookSecret)
+		webHandler.oauthConfig = oauthConfig
+	}
+
 	// Setup routes
 	router := http.NewServeMux()
 	router.HandleFunc("/webhook", deployer.HandleWebhook)
 	router.HandleFunc("/health", handleHealth)
+
+	// OAuth routes
+	if oauthHandler != nil {
+		router.HandleFunc("/oauth/start", oauthHandler.HandleStart)
+		router.HandleFunc("/oauth/authorize", oauthHandler.HandleAuthorize)
+		router.HandleFunc("/oauth/callback", oauthHandler.HandleCallback)
+	}
+
+	// Web UI routes
+	router.HandleFunc("/", webHandler.HandleIndex)
+	router.HandleFunc("/status", webHandler.HandleStatus)
 
 	// Create server with timeouts
 	server := &http.Server{
@@ -90,12 +165,16 @@ func main() {
 	if config.GiteaAccessToken != "" {
 		log.Printf("Gitea API configured: %s", config.GiteaAPIURL)
 		if config.GiteaAPIURL != "" {
-			// Auto-register webhooks
+			// Auto-register webhooks (legacy mode with global token)
 			go autoRegisterWebhooks(config)
 		}
 	}
 	if config.GiteaSSHKeyPath != "" {
 		log.Printf("SSH Key configured: %s", config.GiteaSSHKeyPath)
+	}
+
+	if config.OAuthClientID != "" {
+		log.Printf("OAuth2 enabled: %s", config.GiteaAPIURL)
 	}
 
 	if err := server.ListenAndServe(); err != nil {
