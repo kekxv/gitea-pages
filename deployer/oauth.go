@@ -61,10 +61,16 @@ func (s *TokenStore) Get(username string) *UserToken {
 }
 
 // GetTokenForRepo returns the access token for a repository owner
+// SECURITY: Also checks if token has expired
 func (s *TokenStore) GetTokenForRepo(owner string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if token, ok := s.tokens[owner]; ok {
+		// Check if token has expired
+		if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
+			log.Printf("Token for %s has expired", owner)
+			return ""
+		}
 		return token.AccessToken
 	}
 	return ""
@@ -215,22 +221,21 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redirect to OAuth provider
-	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20write:user%%20read:repository%%20write:repository%%20write:organization",
+	// SECURITY: Removed write:repository scope - we only need read access for cloning
+	// write:repository would allow pushing code, deleting branches, modifying repo settings
+	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20write:user%%20read:repository%%20write:organization",
 		authURL,
 		h.config.ClientID,
 		redirectURL,
 		state,
 	)
 
-	log.Printf("OAuth redirect URL: %s (host: %s)", authRedirectURL, host)
+	log.Printf("OAuth redirect initiated for host: %s", host)
 	http.Redirect(w, r, authRedirectURL, http.StatusTemporaryRedirect)
 }
 
 // HandleCallback handles the OAuth2 callback
 func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
-	log.Printf("OAuth callback received: %s", r.URL.String())
-	log.Printf("Query parameters: %s", r.URL.RawQuery)
-
 	// Verify state
 	stateCookie, err := r.Cookie("oauth_state")
 	if err != nil {
@@ -239,9 +244,8 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("State from cookie: %s, State from URL: %s", stateCookie.Value, r.URL.Query().Get("state"))
-
 	if stateCookie.Value != r.URL.Query().Get("state") {
+		log.Printf("OAuth state mismatch")
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
@@ -254,7 +258,6 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := r.URL.Query().Get("code")
-	log.Printf("Authorization code: %s", code)
 	if code == "" {
 		http.Error(w, "No authorization code", http.StatusBadRequest)
 		return
@@ -282,6 +285,10 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		AccessToken: token.AccessToken,
 		TokenType:   token.TokenType,
 		CreatedAt:   time.Now(),
+	}
+	// Set expiration if provided
+	if token.ExpiresIn > 0 {
+		userToken.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	h.store.Set(userToken.Username, userToken)
 
@@ -387,9 +394,6 @@ func (h *OAuthHandler) exchangeCode(code string, redirectURL string) (*OAuthToke
 		code,
 	)
 
-	log.Printf("Exchanging code at URL: %s", url)
-	log.Printf("Request data (client_id only): grant_type=authorization_code&client_id=%s&redirect_uri=%s", h.config.ClientID, redirectURL)
-
 	req, err := http.NewRequest("POST", url, strings.NewReader(data))
 	if err != nil {
 		return nil, err
@@ -404,17 +408,16 @@ func (h *OAuthHandler) exchangeCode(code string, redirectURL string) (*OAuthToke
 	}
 	defer resp.Body.Close()
 
-	log.Printf("Token exchange response status: %d", resp.StatusCode)
-
-	// Read response body for debugging
+	// Read response body
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("Token exchange response body: %s", string(bodyBytes))
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+		// SECURITY: Don't log full response body (may contain sensitive info)
+		log.Printf("Token exchange failed: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("token exchange failed: status %d", resp.StatusCode)
 	}
 
 	var token OAuthTokenResponse
@@ -422,15 +425,13 @@ func (h *OAuthHandler) exchangeCode(code string, redirectURL string) (*OAuthToke
 		return nil, err
 	}
 
-	log.Printf("Token received successfully, token type: %s", token.TokenType)
+	log.Printf("Token received successfully")
 	return &token, nil
 }
 
 // getUserInfo fetches user information
 func (h *OAuthHandler) getUserInfo(token string) (map[string]interface{}, error) {
 	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user"
-
-	log.Printf("Getting user info from: %s", url)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -440,8 +441,6 @@ func (h *OAuthHandler) getUserInfo(token string) (map[string]interface{}, error)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
-	log.Printf("Authorization header: Bearer %s...", token[:min(10, len(token))])
-
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -450,17 +449,15 @@ func (h *OAuthHandler) getUserInfo(token string) (map[string]interface{}, error)
 	}
 	defer resp.Body.Close()
 
-	log.Printf("User info response status: %d", resp.StatusCode)
-
-	// Read response body for debugging
+	// Read response body
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("User info response body: %s", string(bodyBytes))
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("user info request failed: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+		log.Printf("User info request failed: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("user info request failed: status %d", resp.StatusCode)
 	}
 
 	var userInfo map[string]interface{}
@@ -568,12 +565,11 @@ func (h *OAuthHandler) getUserOrganizations(token string) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	// Read body for debugging
+	// Read body
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("User orgs response: %s", string(bodyBytes))
 
 	// Try to parse as array first
 	var orgs []struct {
