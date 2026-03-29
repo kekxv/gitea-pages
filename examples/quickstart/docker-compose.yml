@@ -15,9 +15,9 @@ services:
       - GITEA__security__INSTALL_LOCK=true
       - GITEA__security__SECRET_KEY=dev-secret-key-for-testing
       - GITEA__security__INTERNAL_TOKEN=dev-internal-token-for-testing
-      # Disable registration for testing
       - GITEA__service__DISABLE_REGISTRATION=false
       - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+      - GITEA__oauth2__ENABLE=true
     volumes:
       - gitea_data:/var/lib/gitea
       - gitea_config:/etc/gitea
@@ -49,8 +49,16 @@ services:
       - MAX_SITE_SIZE_MB=50
       - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
       - GITEA_API_URL=http://gitea:3000
+      # OAuth2 configuration (optional, requires creating OAuth2 app in Gitea)
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL:-http://localhost:8080/oauth/callback}
+      - WEBHOOK_PUBLIC_URL=${WEBHOOK_PUBLIC_URL:-http://deployer:8080/webhook}
+      - GITEA_PUBLIC_URL=${GITEA_PUBLIC_URL:-http://localhost:3000}
     volumes:
       - pages_data:/var/www/pages:rw
+    ports:
+      - "8080:8080"
     networks:
       - pages_network
     healthcheck:
@@ -71,7 +79,7 @@ services:
     depends_on:
       - deployer
     ports:
-      - "8080:80"
+      - "8888:80"
     volumes:
       - pages_data:/var/www/pages:ro
     networks:

@@ -111,6 +111,80 @@ func (g *GitOperations) Deploy(cloneURL, targetPath string, owner, repo string) 
 	return nil
 }
 
+// DeployWithToken clones repository with a specific user token (for OAuth)
+func (g *GitOperations) DeployWithToken(cloneURL, targetPath string, owner, repo string, userToken string) error {
+	// Determine which token to use
+	token := userToken
+	if token == "" {
+		token = g.accessToken // Fall back to global token
+	}
+
+	// Prepare authenticated clone URL
+	authCloneURL, err := PrepareCloneURL(cloneURL, token, g.sshKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to prepare clone URL: %w", err)
+	}
+
+	// Setup SSH key if configured
+	if g.sshKeyPath != "" {
+		if err := SetupSSHKey(g.sshKeyPath); err != nil {
+			return fmt.Errorf("failed to setup SSH key: %w", err)
+		}
+	}
+
+	// Create temp directory for cloning
+	tempDir, err := os.MkdirTemp("", "gitea-pages-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Clone repository with shallow clone
+	if err := g.cloneRepo(authCloneURL, tempDir, g.sshKeyPath); err != nil {
+		return fmt.Errorf("failed to clone: %w", err)
+	}
+
+	// Remove .git directory from cloned repo
+	gitDir := filepath.Join(tempDir, ".git")
+	if err := RemoveGitDir(gitDir); err != nil {
+		log.Printf("Warning: failed to remove .git dir: %v", err)
+	}
+
+	// Security: Check site size before deployment
+	sizeBytes, err := CalculateDirSize(tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to calculate size: %w", err)
+	}
+	maxSizeBytes := g.maxSiteSizeMB * 1024 * 1024
+	if sizeBytes > maxSizeBytes {
+		return fmt.Errorf("site size %d MB exceeds maximum allowed %d MB", sizeBytes/1024/1024, g.maxSiteSizeMB)
+	}
+	log.Printf("Site size: %d MB (limit: %d MB)", sizeBytes/1024/1024, g.maxSiteSizeMB)
+
+	// Ensure target directory parent exists
+	parentDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return fmt.Errorf("failed to create parent dir: %w", err)
+	}
+
+	// Clean existing target directory if exists
+	if err := CleanTargetDir(targetPath); err != nil {
+		return fmt.Errorf("failed to clean target dir: %w", err)
+	}
+
+	// Copy files from temp to target
+	if err := g.copyFiles(tempDir, targetPath); err != nil {
+		return fmt.Errorf("failed to copy files: %w", err)
+	}
+
+	// Set secure permissions on target files
+	if err := SetSecurePermissions(targetPath); err != nil {
+		return fmt.Errorf("failed to set permissions: %w", err)
+	}
+
+	return nil
+}
+
 // cloneRepo performs a shallow clone of the repository
 func (g *GitOperations) cloneRepo(cloneURL, targetDir, sshKeyPath string) error {
 	// Security: Sanitize clone URL to prevent command injection

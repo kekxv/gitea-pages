@@ -20,8 +20,8 @@ A GitHub Pages-like static site hosting system for Gitea. Automatically deploys 
 - **Automatic Cleanup**: Delete `gh-pages` branch → site automatically removed
 - **Wildcard Domain Routing**: `username.pages.yourdomain.com` and `username.pages.yourdomain.com/repo`
 - **Security Hardened**: Non-root containers, symlink blocking, path traversal protection
-- **Private Repo Support**: Access Token authentication
-- **Auto Webhook Registration**: Automatically registers webhooks for all repositories
+- **Private Repo Support**: OAuth2 user authorization
+- **Auto Webhook Registration**: Users authorize once, webhooks auto-registered for all repos
 
 ### Quick Start
 
@@ -51,35 +51,65 @@ cd gitea-pages
 docker-compose up -d --build
 ```
 
-#### Configure Environment
+### OAuth2 Configuration (Recommended)
 
-After starting services, configure Gitea Access Token:
+Users can self-authorize to enable automatic webhook registration and private repo access.
 
-```bash
-cp .env.example .env
-# Edit .env with your settings
-```
-
-Key settings:
-- `DOMAIN`: Your domain (e.g., `example.com`)
-- `WEBHOOK_SECRET`: Secret for Gitea webhook verification
-- `GITEA_ACCESS_TOKEN`: Token for private repos and auto webhook registration
-- `GITEA_API_URL`: Your Gitea server URL
-
-Then restart deployer to apply:
-
-```bash
-docker compose up -d
-```
-
-#### Configure Gitea Access Token
+#### Step 1: Create OAuth2 Application in Gitea
 
 1. Login to Gitea
-2. Go to **Settings → Applications → Access Tokens**
-3. Create token with `write:repository`, `write:admin`, `write:user` scopes
-4. Add to `.env`:
+2. Go to **Settings → Applications → OAuth2 Applications**
+3. Click **Create OAuth2 Application**
+4. Fill in:
+   - **Application Name**: `Gitea Pages`
+   - **Redirect URI**: `http://your-deployer-host:8080/oauth/callback`
+   - **Confidential Client**: **YES** (Important!)
+5. Copy **Client ID** and **Client Secret**
+
+#### Step 2: Configure Deployer
+
+Add to `.env`:
+```bash
+OAUTH_CLIENT_ID=your-client-id
+OAUTH_CLIENT_SECRET=your-client-secret
+OAUTH_REDIRECT_URL=http://your-deployer-host:8080/oauth/callback
+WEBHOOK_PUBLIC_URL=http://deployer:8080/webhook
+GITEA_PUBLIC_URL=http://your-gitea-host:3000
+```
+
+#### Step 3: User Authorization
+
+1. Visit `http://your-deployer-host:8080`
+2. Click **"Authorize Gitea Pages"**
+3. Login to Gitea and approve the authorization
+4. Webhooks are automatically registered for all your repositories
+
+### Permission Explanation
+
+When users authorize Gitea Pages, the following permissions are requested:
+
+| Permission | Scope | Purpose |
+|------------|-------|---------|
+| Read User Info | `read:user` | Get username to identify site ownership |
+| Read Repositories | `read:repository` | Clone repository code for deployment |
+| Manage Webhooks | `write:repository` | Auto-register webhooks for push/delete events |
+
+Users can revoke authorization anytime in Gitea **Settings → Applications → OAuth2 Applications**.
+
+### Private Repository Support
+
+With OAuth2 authorization, private repositories are automatically supported. The deployer uses the user's OAuth token to clone private repos when deploying their sites.
+
+### Legacy Mode: Shared Access Token
+
+Alternatively, you can use a shared access token (less secure, requires manual user management):
+
+1. Create a `pages-bot` user in Gitea
+2. Generate an Access Token with `write:repository`, `write:admin`, `write:user` scopes
+3. Users add `pages-bot` as collaborator to their repos
+4. Configure in `.env`:
    ```bash
-   GITEA_ACCESS_TOKEN=your-token
+   GITEA_ACCESS_TOKEN=pages-bot-token
    GITEA_API_URL=https://gitea.example.com
    ```
 
@@ -128,7 +158,8 @@ Site available at: `https://username.pages.example.com/my-site`
 │  • Remove .git directory                                    │
 │  • Set permissions 644/755                                  │
 │  • Block symlinks                                           │
-│  • Auto-register webhooks on startup                        │
+│  • OAuth2 user authorization                                │
+│  • Auto-register webhooks for authorized users              │
 │  • Delete site on branch deletion                           │
 └─────────────────────────────────────────────────────────────┘
                               │
@@ -154,7 +185,7 @@ Site available at: `https://username.pages.example.com/my-site`
 | .git directory removal | Automatic cleanup |
 | Webhook signature | HMAC-SHA256 verification |
 | Site size limit | `MAX_SITE_SIZE_MB` (default 100MB) |
-| Private repo support | Access Token authentication |
+| Private repo support | OAuth2 user tokens |
 
 ### Directory Structure
 
@@ -171,6 +202,8 @@ gitea-pages/
 │   ├── handler.go         # Webhook handler
 │   ├── git.go             # Git operations
 │   ├── gitea.go           # Gitea API client
+│   ├── oauth.go           # OAuth2 handler
+│   ├── web.go             # Web UI
 │   ├── auto_register.go   # Auto webhook registration
 │   └── security.go        # Security utilities
 └── examples/quickstart/   # Complete test environment
@@ -205,8 +238,8 @@ MIT License
 - **自动清理**：删除 `gh-pages` 分支 → 自动删除站点
 - **泛域名路由**：支持 `username.pages.yourdomain.com` 和 `username.pages.yourdomain.com/repo`
 - **安全加固**：非 root 容器、阻止软链接、路径遍历防护
-- **私有仓库支持**：Access Token 认证
-- **自动注册 Webhook**：启动时自动为所有仓库注册 webhook
+- **私有仓库支持**：OAuth2 用户授权
+- **自动注册 Webhook**：用户授权一次，自动为所有仓库注册 webhook
 
 ### 快速开始
 
@@ -236,35 +269,65 @@ cd gitea-pages
 docker-compose up -d --build
 ```
 
-#### 配置环境变量
+### OAuth2 配置（推荐）
 
-启动服务后，配置 Gitea Access Token：
+用户可以自助授权，启用自动 webhook 注册和私有仓库访问。
 
-```bash
-cp .env.example .env
-# 编辑 .env 填入你的配置
-```
-
-关键配置：
-- `DOMAIN`：你的域名（如 `example.com`）
-- `WEBHOOK_SECRET`：Gitea webhook 验证密钥
-- `GITEA_ACCESS_TOKEN`：用于私有仓库和自动注册 webhook
-- `GITEA_API_URL`：Gitea 服务器地址
-
-然后重启 deployer 使配置生效：
-
-```bash
-docker compose up -d
-```
-
-#### 配置 Gitea Access Token
+#### 步骤 1：在 Gitea 创建 OAuth2 应用
 
 1. 登录 Gitea
-2. 进入 **设置 → 应用 → Access Tokens**
-3. 创建 token，选择 `write:repository`、`write:admin`、`write:user` 权限
-4. 添加到 `.env`：
+2. 进入 **设置 → 应用 → OAuth2 应用**
+3. 点击 **创建 OAuth2 应用**
+4. 填写：
+   - **应用名称**：`Gitea Pages`
+   - **重定向 URI**：`http://your-deployer-host:8080/oauth/callback`
+   - **机密客户端**：**是**（重要！）
+5. 复制 **客户端 ID** 和 **客户端密钥**
+
+#### 步骤 2：配置 Deployer
+
+添加到 `.env`：
+```bash
+OAUTH_CLIENT_ID=你的客户端ID
+OAUTH_CLIENT_SECRET=你的客户端密钥
+OAUTH_REDIRECT_URL=http://your-deployer-host:8080/oauth/callback
+WEBHOOK_PUBLIC_URL=http://deployer:8080/webhook
+GITEA_PUBLIC_URL=http://your-gitea-host:3000
+```
+
+#### 步骤 3：用户授权
+
+1. 访问 `http://your-deployer-host:8080`
+2. 点击 **"授权 Gitea Pages"**
+3. 登录 Gitea 并批准授权
+4. Webhook 自动为你所有仓库注册
+
+### 权限说明
+
+用户授权 Gitea Pages 时，请求以下权限：
+
+| 权限 | Scope | 用途 |
+|------|-------|------|
+| 读取用户信息 | `read:user` | 获取用户名以标识站点所有权 |
+| 读取仓库 | `read:repository` | 克隆仓库代码进行部署 |
+| 管理 Webhook | `write:repository` | 自动注册推送/删除事件的 webhook |
+
+用户可随时在 Gitea **设置 → 应用 → OAuth2 应用** 中撤销授权。
+
+### 私有仓库支持
+
+通过 OAuth2 授权，私有仓库自动获得支持。部署时 Deployer 使用用户的 OAuth token 克隆私有仓库。
+
+### 传统模式：共享 Access Token
+
+或者，可以使用共享的 access token（安全性较低，需要手动管理用户）：
+
+1. 在 Gitea 创建 `pages-bot` 用户
+2. 生成具有 `write:repository`、`write:admin`、`write:user` 权限的 Access Token
+3. 用户将 `pages-bot` 添加为协作者
+4. 在 `.env` 中配置：
    ```bash
-   GITEA_ACCESS_TOKEN=your-token
+   GITEA_ACCESS_TOKEN=pages-bot-token
    GITEA_API_URL=https://gitea.example.com
    ```
 
@@ -313,7 +376,8 @@ git push -u origin gh-pages
 │  • 删除 .git 目录                                           │
 │  • 设置权限 644/755                                         │
 │  • 阻止软链接                                               │
-│  • 启动时自动注册 webhook                                   │
+│  • OAuth2 用户授权                                          │
+│  • 为授权用户自动注册 webhook                                │
 │  • 分支删除时自动清理站点                                   │
 └─────────────────────────────────────────────────────────────┘
                               │
@@ -339,7 +403,7 @@ git push -u origin gh-pages
 | 删除 .git 目录 | 自动清理 |
 | Webhook 签名验证 | HMAC-SHA256 |
 | 站点大小限制 | `MAX_SITE_SIZE_MB` (默认 100MB) |
-| 私有仓库支持 | Access Token 认证 |
+| 私有仓库支持 | OAuth2 用户令牌 |
 
 ### 目录结构
 
@@ -356,6 +420,8 @@ gitea-pages/
 │   ├── handler.go         # Webhook 处理
 │   ├── git.go             # Git 操作
 │   ├── gitea.go           # Gitea API 客户端
+│   ├── oauth.go           # OAuth2 处理
+│   ├── web.go             # Web UI
 │   ├── auto_register.go   # 自动注册 webhook
 │   └── security.go        # 安全工具函数
 └── examples/quickstart/   # 完整测试环境

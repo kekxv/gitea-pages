@@ -64,8 +64,9 @@ type GiteaDeletePayload struct {
 
 // Deployer handles webhook requests and deployment
 type Deployer struct {
-	config *Config
-	gitOps *GitOperations
+	config     *Config
+	gitOps     *GitOperations
+	tokenStore *TokenStore // For OAuth user tokens
 }
 
 // NewDeployer creates a new Deployer instance
@@ -74,6 +75,11 @@ func NewDeployer(config *Config) *Deployer {
 		config: config,
 		gitOps: NewGitOperations(config),
 	}
+}
+
+// SetTokenStore sets the token store for OAuth user tokens
+func (d *Deployer) SetTokenStore(store *TokenStore) {
+	d.tokenStore = store
 }
 
 // HandleWebhook processes Gitea push and delete webhooks
@@ -149,9 +155,18 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Deploying to: %s", targetPath)
 
+	// Get user token for private repo access (if OAuth is enabled)
+	userToken := ""
+	if d.tokenStore != nil && payload.Repository.Private {
+		userToken = d.tokenStore.GetTokenForRepo(payload.Repository.Owner.Username)
+		if userToken != "" {
+			log.Printf("Using OAuth token for user: %s", payload.Repository.Owner.Username)
+		}
+	}
+
 	// Perform deployment with pre-clone size check and private repo auth
-	if err := d.gitOps.Deploy(payload.Repository.CloneURL, targetPath,
-		payload.Repository.Owner.Username, payload.Repository.Name); err != nil {
+	if err := d.gitOps.DeployWithToken(payload.Repository.CloneURL, targetPath,
+		payload.Repository.Owner.Username, payload.Repository.Name, userToken); err != nil {
 		log.Printf("Deployment failed: %v", err)
 		http.Error(w, fmt.Sprintf("Deployment failed: %v", err), http.StatusInternalServerError)
 		return

@@ -1,24 +1,66 @@
+# Gitea Pages - Simple Deployment
+# Minimal docker-compose for deployer + nginx
+
 services:
   deployer:
     image: ghcr.io/kekxv/gitea-pages/deployer:latest
     restart: unless-stopped
     environment:
-      - DOMAIN=yourdomain.com
-      - WEBHOOK_SECRET=your-secret
-      - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
-      - GITEA_API_URL=${GITEA_API_URL:-}
+      # Required: your domain (e.g., example.com)
+      - DOMAIN=${DOMAIN:-yourdomain.com}
+      # Required: webhook secret (must match Gitea webhook secret)
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-your-webhook-secret}
+
+      # Gitea API URL (internal network for API calls)
+      - GITEA_API_URL=${GITEA_API_URL:-http://gitea:3000}
+
+      # OAuth2 configuration (recommended for user self-authorization)
+      # Create OAuth2 app in Gitea: Settings -> Applications -> OAuth2 Applications
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL:-https://pages.yourdomain.com/oauth/callback}
+      - WEBHOOK_PUBLIC_URL=${WEBHOOK_PUBLIC_URL:-http://deployer:8080/webhook}
+      - GITEA_PUBLIC_URL=${GITEA_PUBLIC_URL:-https://gitea.yourdomain.com}
+
+      # Optional: shared access token (legacy mode, less secure)
+      # - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
     volumes:
       - pages_data:/var/www/pages
+      # Optional: SSH deploy key for private repos
+      # - ./deploy-key:/var/www/pages/.ssh/id_rsa:ro
     ports:
       - "8080:8080"
 
   nginx:
     image: ghcr.io/kekxv/gitea-pages/nginx:latest
     restart: unless-stopped
+    depends_on:
+      - deployer
     volumes:
       - pages_data:/var/www/pages:ro
     ports:
       - "80:80"
+    # For HTTPS, also expose 443 and configure SSL certificates
 
 volumes:
   pages_data:
+
+# Usage:
+#   1. Copy .env.example to .env and edit configuration
+#
+#   2. Create OAuth2 app in Gitea:
+#      - Go to Settings -> Applications -> OAuth2 Applications
+#      - Click "Create OAuth2 Application"
+#      - Name: Gitea Pages
+#      - Redirect URIs: Add all domains:
+#          https://pages.yourdomain.com/oauth/callback
+#          http://localhost:8080/oauth/callback
+#      - Confidential Client: YES
+#      - Copy Client ID and Secret to .env
+#
+#   3. Run: docker compose up -d
+#
+#   4. Users visit https://pages.yourdomain.com to authorize
+#      - Click "Authorize Gitea Pages"
+#      - Webhooks are automatically registered for all repos
+#      - Private repository access is enabled
