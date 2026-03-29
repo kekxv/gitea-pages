@@ -568,12 +568,32 @@ func (h *OAuthHandler) getUserOrganizations(token string) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
+	// Read body for debugging
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("User orgs response: %s", string(bodyBytes))
+
+	// Try to parse as array first
 	var orgs []struct {
 		Username string `json:"username"`
 		Name     string `json:"name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
-		return nil, err
+	if err := json.Unmarshal(bodyBytes, &orgs); err != nil {
+		// If that fails, try parsing as single object (some Gitea versions return differently)
+		var singleOrg struct {
+			Username string `json:"username"`
+			Name     string `json:"name"`
+		}
+		if err2 := json.Unmarshal(bodyBytes, &singleOrg); err2 == nil {
+			orgs = []struct {
+				Username string `json:"username"`
+				Name     string `json:"name"`
+			}{singleOrg}
+		} else {
+			return nil, fmt.Errorf("failed to parse orgs response: %v", err)
+		}
 	}
 
 	var orgNames []string
