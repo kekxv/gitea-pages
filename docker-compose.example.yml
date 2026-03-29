@@ -1,0 +1,24 @@
+services:
+  deployer:
+    image: ghcr.io/kekxv/gitea-pages/deployer:latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=yourdomain.com
+      - WEBHOOK_SECRET=your-secret
+      - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
+      - GITEA_API_URL=${GITEA_API_URL:-}
+    volumes:
+      - pages_data:/var/www/pages
+    ports:
+      - "8080:8080"
+
+  nginx:
+    image: ghcr.io/kekxv/gitea-pages/nginx:latest
+    restart: unless-stopped
+    volumes:
+      - pages_data:/var/www/pages:ro
+    ports:
+      - "80:80"
+
+volumes:
+  pages_data:
