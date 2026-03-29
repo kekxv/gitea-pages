@@ -1,0 +1,109 @@
+# Gitea Pages Docker Compose
+# Security-hardened deployment with non-root containers
+
+services:
+  # Nginx - Static file server (read-only access to pages)
+  nginx:
+    build:
+      context: ./nginx
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    container_name: gitea-pages-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - pages_data:/var/www/pages:ro
+      - certs_data:/etc/letsencrypt:ro
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/run/nginx:size=10M,mode=755
+      - /var/cache/nginx:size=50M,mode=755
+      - /var/log/nginx:size=10M,mode=755
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8081/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - pages_network
+    depends_on:
+      - deployer
+
+  # Deployer - Webhook handler (write access to pages)
+  deployer:
+    build:
+      context: ./deployer
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    container_name: gitea-pages-deployer
+    restart: unless-stopped
+    ports:
+      - "${WEBHOOK_PORT:-8080}:8080"
+    volumes:
+      - pages_data:/var/www/pages:rw
+      # SSH key for private repository access (optional)
+      - ${GITEA_SSH_KEY_PATH:-/dev/null}:/var/www/pages/.ssh/id_rsa:ro
+    environment:
+      - DOMAIN=${DOMAIN:-yourdomain.com}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - WEBHOOK_PORT=8080
+      - PAGES_DATA_DIR=/var/www/pages
+      - ENABLE_HTTPS=${ENABLE_HTTPS:-false}
+      - MAX_SITE_SIZE_MB=${MAX_SITE_SIZE_MB:-100}
+      - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
+      - GITEA_API_URL=${GITEA_API_URL:-}
+      - GITEA_SSH_KEY_PATH=${GITEA_SSH_KEY_PATH:-}
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M,mode=755
+      - /var/log:size=10M,mode=755
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - pages_network
+
+  # Certbot - Let's Encrypt certificate management (optional)
+  certbot:
+    image: certbot/certbot:latest
+    container_name: gitea-pages-certbot
+    restart: unless-stopped
+    profiles:
+      - https
+    volumes:
+      - certs_data:/etc/letsencrypt
+      - pages_data:/var/www/pages:ro
+    environment:
+      - DOMAIN=${DOMAIN:-yourdomain.com}
+      - CERT_EMAIL=${CERT_EMAIL:-admin@yourdomain.com}
+    entrypoint: /bin/sh
+    command: -c "certbot certonly --webroot --webroot-path=/var/www/pages/_certbot -d *.${DOMAIN} --email ${CERT_EMAIL} --agree-tos --no-eff-email --keep-or-renew && crond -f"
+    networks:
+      - pages_network
+
+volumes:
+  pages_data:
+    name: gitea-pages-data
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PAGES_DATA_DIR:-/data/gitea-pages}
+  certs_data:
+    name: gitea-pages-certs
+
+networks:
+  pages_network:
+    name: gitea-pages-network
+    driver: bridge

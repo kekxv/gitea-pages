@@ -1,0 +1,31 @@
+{
+  "ref": "refs/heads/gh-pages",
+  "before": "abc123",
+  "after": "def456",
+  "repository": {
+    "id": 1,
+    "name": "test-repo",
+    "full_name": "testuser/test-repo",
+    "owner": {
+      "id": 1,
+      "username": "testuser",
+      "name": "Test User",
+      "email": "test@example.com"
+    },
+    "clone_url": "https://gitea.example.com/testuser/test-repo.git",
+    "html_url": "https://gitea.example.com/testuser/test-repo",
+    "private": false
+  },
+  "pusher": {
+    "id": 1,
+    "login": "testuser",
+    "name": "Test User",
+    "email": "test@example.com"
+  },
+  "commits": [
+    {
+      "id": "def456",
+      "message": "Update pages"
+    }
+  ]
+}

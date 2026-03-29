@@ -1,0 +1,34 @@
+# Environment files
+.env
+!.env.example
+
+# Build artifacts
+deployer/deployer
+
+# Test artifacts
+examples/quickstart/test-repo/
+examples/quickstart/root-site-repo/
+examples/quickstart/private-repo/
+examples/quickstart/oversized-repo/
+examples/quickstart/symlink-repo/
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Coverage
+coverage.out
+
+# Temporary files
+tmp/
+temp/

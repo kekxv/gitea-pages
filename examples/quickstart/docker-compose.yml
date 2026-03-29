@@ -1,0 +1,92 @@
+# Gitea Pages Quickstart Example
+# Complete testing environment with Gitea
+
+services:
+  # Gitea Server
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea-pages-test-gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__server__ROOT_URL=http://gitea:3000
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=dev-secret-key-for-testing
+      - GITEA__security__INTERNAL_TOKEN=dev-internal-token-for-testing
+      # Disable registration for testing
+      - GITEA__service__DISABLE_REGISTRATION=false
+      - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+    volumes:
+      - gitea_data:/var/lib/gitea
+      - gitea_config:/etc/gitea
+    ports:
+      - "3000:3000"
+    networks:
+      - pages_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Deployer Service
+  deployer:
+    build:
+      context: ../../deployer
+    container_name: gitea-pages-test-deployer
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+    environment:
+      - DOMAIN=pages.local
+      - WEBHOOK_SECRET=test-webhook-secret
+      - WEBHOOK_PORT=8080
+      - PAGES_DATA_DIR=/var/www/pages
+      - MAX_SITE_SIZE_MB=50
+      - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
+      - GITEA_API_URL=http://gitea:3000
+    volumes:
+      - pages_data:/var/www/pages:rw
+    networks:
+      - pages_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Nginx Service
+  nginx:
+    build:
+      context: ../../nginx
+      args:
+        PUID: 1000
+        PGID: 1000
+    container_name: gitea-pages-test-nginx
+    restart: unless-stopped
+    depends_on:
+      - deployer
+    ports:
+      - "8080:80"
+    volumes:
+      - pages_data:/var/www/pages:ro
+    networks:
+      - pages_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  gitea_data:
+  gitea_config:
+  pages_data:
+
+networks:
+  pages_network:
+    driver: bridge
