@@ -604,8 +604,101 @@ func (h *OAuthHandler) getUserOrganizations(token string) ([]string, error) {
 	return orgNames, nil
 }
 
+// webhookConfig represents webhook config for comparison
+type webhookConfig struct {
+	URL string `json:"url"`
+}
+
+// webhookInfo represents webhook info from API
+type webhookInfo struct {
+	ID     int64         `json:"id"`
+	Type   string        `json:"type"`
+	Config webhookConfig `json:"config"`
+	Events []string      `json:"events"`
+	Active bool          `json:"active"`
+}
+
+// checkUserWebhookExists checks if a webhook with the same URL already exists
+func (h *OAuthHandler) checkUserWebhookExists(token string) (bool, error) {
+	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user/hooks"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil // If we can't list, proceed to create
+	}
+
+	var webhooks []webhookInfo
+	if err := json.NewDecoder(resp.Body).Decode(&webhooks); err != nil {
+		return false, err
+	}
+
+	for _, wh := range webhooks {
+		if wh.Config.URL == h.webhookURL {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// checkOrgWebhookExists checks if a webhook with the same URL already exists for org
+func (h *OAuthHandler) checkOrgWebhookExists(token, org string) (bool, error) {
+	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/orgs/" + org + "/hooks"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil // If we can't list, proceed to create
+	}
+
+	var webhooks []webhookInfo
+	if err := json.NewDecoder(resp.Body).Decode(&webhooks); err != nil {
+		return false, err
+	}
+
+	for _, wh := range webhooks {
+		if wh.Config.URL == h.webhookURL {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // registerOrgWebhook registers a webhook at organization level
 func (h *OAuthHandler) registerOrgWebhook(token, org string) error {
+	// Check if webhook already exists
+	exists, err := h.checkOrgWebhookExists(token, org)
+	if err != nil {
+		log.Printf("Warning: failed to check existing org webhooks: %v", err)
+	} else if exists {
+		log.Printf("Webhook already exists for org %s, skipping", org)
+		return nil
+	}
+
 	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/orgs/" + org + "/hooks"
 
 	payload := map[string]interface{}{
@@ -654,6 +747,15 @@ func (h *OAuthHandler) registerOrgWebhook(token, org string) error {
 
 // registerUserWebhook registers a webhook at user level (covers all repositories)
 func (h *OAuthHandler) registerUserWebhook(token string) error {
+	// Check if webhook already exists
+	exists, err := h.checkUserWebhookExists(token)
+	if err != nil {
+		log.Printf("Warning: failed to check existing user webhooks: %v", err)
+	} else if exists {
+		log.Printf("Webhook already exists for user, skipping")
+		return nil
+	}
+
 	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user/hooks"
 
 	payload := map[string]interface{}{
