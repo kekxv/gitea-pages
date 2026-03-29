@@ -98,20 +98,28 @@ func TestCalculateTargetPath(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "root site - repo matches username",
-			pagesDir: "/var/www/pages",
-			username: "alice",
-			repoName: "alice",
-			domain:   "example.com",
-			expected: "/var/www/pages/alice/_root",
-		},
-		{
 			name:     "root site - repo is username.pages.domain",
 			pagesDir: "/var/www/pages",
 			username: "alice",
 			repoName: "alice.pages.example.com",
 			domain:   "example.com",
 			expected: "/var/www/pages/alice/_root",
+		},
+		{
+			name:     "root site - username.pages.local",
+			pagesDir: "/var/www/pages",
+			username: "testuser",
+			repoName: "testuser.pages.local",
+			domain:   "pages.local",
+			expected: "/var/www/pages/testuser/_root",
+		},
+		{
+			name:     "sub directory site - repo matches username (not root)",
+			pagesDir: "/var/www/pages",
+			username: "alice",
+			repoName: "alice",
+			domain:   "example.com",
+			expected: "/var/www/pages/alice/alice",
 		},
 		{
 			name:     "sub directory site",
