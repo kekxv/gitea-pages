@@ -43,7 +43,7 @@ jobs:
 
       - name: Extract metadata for Deployer
         id: meta-deployer
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_DEPLOYER }}
           tags: |
@@ -56,7 +56,7 @@ jobs:
 
       - name: Extract metadata for Nginx
         id: meta-nginx
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_NGINX }}
           tags: |
