@@ -1,8 +1,8 @@
 # Gitea Pages - Actionless Static Site Hosting
 
 [![Build and Push Docker Images](https://github.com/kekxv/gitea-pages/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/kekxv/gitea-pages/actions/workflows/docker-publish.yml)
-[![Deployer Image](https://img.shields.io/badge/ghcr.io%2Fkekxv%2Fgitea-pages%2Fdeployer-latest-blue)](https://github.com/kekxv/gitea-pages/pkgs/container/deployer)
-[![Nginx Image](https://img.shields.io/badge/ghcr.io%2Fkekxv%2Fgitea-pages%2Fnginx-latest-blue)](https://github.com/kekxv/gitea-pages/pkgs/container/nginx)
+[![Deployer Image](https://img.shields.io/badge/ghcr.io%2Fkekxv%2Fgitea-pages%2Fdeployer-latest)](https://github.com/kekxv/gitea-pages/pkgs/container/deployer)
+[![Nginx Image](https://img.shields.io/badge/ghcr.io%2Fkekxv%2Fgitea-pages%2Fnginx-latest)](https://github.com/kekxv/gitea-pages/pkgs/container/nginx)
 
 [English](#english) | [中文](#中文)
 
@@ -91,8 +91,10 @@ When users authorize Gitea Pages, the following permissions are requested:
 | Permission | Scope | Purpose |
 |------------|-------|---------|
 | Read User Info | `read:user` | Get username to identify site ownership |
+| Manage User Settings | `write:user` | Register user-level webhooks for all personal repos |
 | Read Repositories | `read:repository` | Clone repository code for deployment |
-| Manage Webhooks | `write:repository` | Auto-register webhooks for push/delete events |
+| Manage Repository Webhooks | `write:repository` | Auto-register webhooks for push/delete events |
+| Manage Organization Webhooks | `write:organization` | Register org-level webhooks for all org repos |
 
 Users can revoke authorization anytime in Gitea **Settings → Applications → OAuth2 Applications**.
 
@@ -309,8 +311,10 @@ GITEA_PUBLIC_URL=http://your-gitea-host:3000
 | 权限 | Scope | 用途 |
 |------|-------|------|
 | 读取用户信息 | `read:user` | 获取用户名以标识站点所有权 |
+| 管理用户设置 | `write:user` | 注册用户级 webhook，覆盖所有个人仓库 |
 | 读取仓库 | `read:repository` | 克隆仓库代码进行部署 |
-| 管理 Webhook | `write:repository` | 自动注册推送/删除事件的 webhook |
+| 管理仓库 Webhook | `write:repository` | 自动注册推送/删除事件的 webhook |
+| 管理组织 Webhook | `write:organization` | 注册组织级 webhook，覆盖组织下所有仓库 |
 
 用户可随时在 Gitea **设置 → 应用 → OAuth2 应用** 中撤销授权。
 

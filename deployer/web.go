@@ -182,7 +182,8 @@ func (h *WebHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
                         <ul>
                             <li>读取用户信息 - 标识站点所有者</li>
                             <li>读取仓库 - 克隆代码部署</li>
-                            <li>管理 Webhook - 推送即部署</li>
+                            <li>管理用户 Webhook - 个人仓库推送即部署</li>
+                            <li>管理组织 Webhook - 组织仓库推送即部署</li>
                         </ul>
                     </div>
                 </div>

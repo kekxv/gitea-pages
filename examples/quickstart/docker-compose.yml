@@ -18,6 +18,7 @@ services:
       - GITEA__service__DISABLE_REGISTRATION=false
       - GITEA__service__REQUIRE_SIGNIN_VIEW=false
       - GITEA__oauth2__ENABLE=true
+      - GITEA__webhook__ALLOWED_HOST_LIST=deployer,localhost,127.0.0.1
     volumes:
       - gitea_data:/var/lib/gitea
       - gitea_config:/etc/gitea

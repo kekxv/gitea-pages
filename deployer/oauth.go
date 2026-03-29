@@ -147,7 +147,14 @@ func (h *OAuthHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
                 <div class="permission-icon">🔗</div>
                 <div class="permission-text">
                     <h4>管理 Webhook</h4>
-                    <p>自动为您的仓库注册 Webhook，实现推送即部署</p>
+                    <p>在用户级别注册 Webhook，覆盖您所有仓库的推送和删除事件</p>
+                </div>
+            </div>
+            <div class="permission">
+                <div class="permission-icon">🏢</div>
+                <div class="permission-text">
+                    <h4>管理组织 Webhook</h4>
+                    <p>为您有权限的组织注册 Webhook，覆盖组织下所有仓库</p>
                 </div>
             </div>
         </div>
@@ -208,7 +215,7 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redirect to OAuth provider
-	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20read:repository%%20write:repository",
+	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20write:user%%20read:repository%%20write:repository%%20write:organization",
 		authURL,
 		h.config.ClientID,
 		redirectURL,
@@ -419,40 +426,49 @@ func min(a, b int) int {
 	return b
 }
 
-// registerWebhooks registers webhooks for all user repositories
+// registerWebhooks registers webhooks at user level and organization level
 func (h *OAuthHandler) registerWebhooks(userToken *UserToken) {
-	log.Printf("Registering webhooks for user: %s", userToken.Username)
+	log.Printf("Registering webhooks for: %s", userToken.Username)
 
-	// Get user repositories
-	repos, err := h.getUserRepositories(userToken.AccessToken)
+	// 1. Register user-level webhook (covers all user's personal repos)
+	err := h.registerUserWebhook(userToken.AccessToken)
 	if err != nil {
-		log.Printf("Failed to get repositories for %s: %v", userToken.Username, err)
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "已存在") {
+			log.Printf("User-level webhook already exists for %s", userToken.Username)
+		} else {
+			log.Printf("Failed to register user-level webhook for %s: %v", userToken.Username, err)
+		}
+	} else {
+		log.Printf("User-level webhook registered for %s", userToken.Username)
+	}
+
+	// 2. Register organization-level webhooks (covers all repos in organizations)
+	orgs, err := h.getUserOrganizations(userToken.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get organizations for %s: %v", userToken.Username, err)
 		return
 	}
 
-	log.Printf("Found %d repositories for %s", len(repos), userToken.Username)
-
-	successCount := 0
-	for _, repo := range repos {
-		if err := h.registerWebhookForRepo(userToken.AccessToken, repo); err != nil {
-			if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "已存在") {
-				log.Printf("Webhook already exists for %s", repo)
-				successCount++
+	if len(orgs) > 0 {
+		log.Printf("Found %d organizations for %s", len(orgs), userToken.Username)
+		for _, org := range orgs {
+			err := h.registerOrgWebhook(userToken.AccessToken, org)
+			if err != nil {
+				if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "已存在") {
+					log.Printf("Organization webhook already exists for %s", org)
+				} else {
+					log.Printf("Failed to register org webhook for %s: %v", org, err)
+				}
 			} else {
-				log.Printf("Failed to register webhook for %s: %v", repo, err)
+				log.Printf("Organization webhook registered for %s", org)
 			}
-		} else {
-			log.Printf("Webhook registered for %s", repo)
-			successCount++
 		}
 	}
-
-	log.Printf("Webhook registration complete for %s: %d/%d", userToken.Username, successCount, len(repos))
 }
 
-// getUserRepositories fetches user's repositories
-func (h *OAuthHandler) getUserRepositories(token string) ([]string, error) {
-	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user/repos?limit=100"
+// getUserOrganizations fetches organizations the user belongs to
+func (h *OAuthHandler) getUserOrganizations(token string) ([]string, error) {
+	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user/orgs"
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -467,24 +483,77 @@ func (h *OAuthHandler) getUserRepositories(token string) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	var repos []struct {
-		FullName string `json:"full_name"`
+	var orgs []struct {
+		Username string `json:"username"`
+		Name     string `json:"name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
 		return nil, err
 	}
 
-	var repoNames []string
-	for _, repo := range repos {
-		repoNames = append(repoNames, repo.FullName)
+	var orgNames []string
+	for _, org := range orgs {
+		if org.Username != "" {
+			orgNames = append(orgNames, org.Username)
+		} else if org.Name != "" {
+			orgNames = append(orgNames, org.Name)
+		}
 	}
 
-	return repoNames, nil
+	return orgNames, nil
 }
 
-// registerWebhookForRepo registers a webhook for a specific repository
-func (h *OAuthHandler) registerWebhookForRepo(token, repoFullName string) error {
-	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/repos/" + repoFullName + "/hooks"
+// registerOrgWebhook registers a webhook at organization level
+func (h *OAuthHandler) registerOrgWebhook(token, org string) error {
+	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/orgs/" + org + "/hooks"
+
+	payload := map[string]interface{}{
+		"type": "gitea",
+		"config": map[string]string{
+			"url":          h.webhookURL,
+			"content_type": "json",
+			"secret":       h.secret,
+		},
+		"events": []string{"push", "delete"},
+		"active": true,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var errResp struct {
+			Message string `json:"message"`
+		}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Message != "" {
+			return fmt.Errorf("%s", errResp.Message)
+		}
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// registerUserWebhook registers a webhook at user level (covers all repositories)
+func (h *OAuthHandler) registerUserWebhook(token string) error {
+	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user/hooks"
 
 	payload := map[string]interface{}{
 		"type": "gitea",
