@@ -37,3 +37,4 @@ cookies.txt
 deployer/gitea-pages-deployer
 examples/quickstart/cookies.txt
 examples/quickstart/headers.txt
+examples/quickstart/org-repo

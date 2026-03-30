@@ -16,6 +16,7 @@ type Config struct {
 	WebhookSecret    string
 	WebhookPort      int
 	PagesDir         string
+	DataDir          string // Directory for persistent data (tokens.db, etc.)
 	EnableHTTPS      bool
 	MaxSiteSizeMB    int64
 	GiteaAccessToken string
@@ -49,6 +50,7 @@ func LoadConfig() (*Config, error) {
 		WebhookSecret:    os.Getenv("WEBHOOK_SECRET"),
 		WebhookPort:      port,
 		PagesDir:         getEnvOrDefault("PAGES_DATA_DIR", "/var/www/pages"),
+		DataDir:          getEnvOrDefault("DEPLOYER_DATA_DIR", "/var/lib/deployer"),
 		EnableHTTPS:      enableHTTPS,
 		MaxSiteSizeMB:    maxSizeMB,
 		GiteaAccessToken: os.Getenv("GITEA_ACCESS_TOKEN"),
@@ -85,8 +87,8 @@ func main() {
 	// Initialize deployer
 	deployer := NewDeployer(config)
 
-	// Initialize token store for OAuth
-	tokenStore := NewTokenStore()
+	// Initialize token store for OAuth with SQLite persistence
+	tokenStore := NewTokenStore(config.DataDir)
 
 	// Connect token store to deployer for private repo access
 	deployer.SetTokenStore(tokenStore)

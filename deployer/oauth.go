@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -31,49 +30,6 @@ type UserToken struct {
 	TokenType   string    `json:"token_type"`
 	ExpiresAt   time.Time `json:"expires_at"`
 	CreatedAt   time.Time `json:"created_at"`
-}
-
-// TokenStore stores user tokens in memory (use database in production)
-type TokenStore struct {
-	mu     sync.RWMutex
-	tokens map[string]*UserToken
-}
-
-// NewTokenStore creates a new token store
-func NewTokenStore() *TokenStore {
-	return &TokenStore{
-		tokens: make(map[string]*UserToken),
-	}
-}
-
-// Set stores a user token
-func (s *TokenStore) Set(username string, token *UserToken) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tokens[username] = token
-}
-
-// Get retrieves a user token
-func (s *TokenStore) Get(username string) *UserToken {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.tokens[username]
-}
-
-// GetTokenForRepo returns the access token for a repository owner
-// SECURITY: Also checks if token has expired
-func (s *TokenStore) GetTokenForRepo(owner string) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if token, ok := s.tokens[owner]; ok {
-		// Check if token has expired
-		if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
-			log.Printf("Token for %s has expired", owner)
-			return ""
-		}
-		return token.AccessToken
-	}
-	return ""
 }
 
 // OAuthHandler handles OAuth2 authentication

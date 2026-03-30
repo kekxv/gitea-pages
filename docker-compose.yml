@@ -48,6 +48,7 @@ services:
       - "${WEBHOOK_PORT:-8080}:8080"
     volumes:
       - pages_data:/var/www/pages:rw
+      - deployer_data:/var/lib/deployer:rw
       # SSH key for private repository access (optional)
       - ${GITEA_SSH_KEY_PATH:-/dev/null}:/var/www/pages/.ssh/id_rsa:ro
     environment:
@@ -55,17 +56,19 @@ services:
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_PORT=8080
       - PAGES_DATA_DIR=/var/www/pages
+      - DEPLOYER_DATA_DIR=/var/lib/deployer
       - ENABLE_HTTPS=${ENABLE_HTTPS:-false}
       - MAX_SITE_SIZE_MB=${MAX_SITE_SIZE_MB:-100}
       - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
       - GITEA_API_URL=${GITEA_API_URL:-}
       - GITEA_SSH_KEY_PATH=${GITEA_SSH_KEY_PATH:-}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL:-}
+      - WEBHOOK_PUBLIC_URL=${WEBHOOK_PUBLIC_URL:-}
+      - GITEA_PUBLIC_URL=${GITEA_PUBLIC_URL:-}
     security_opt:
       - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:size=100M,mode=755
-      - /var/log:size=10M,mode=755
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 30s
@@ -100,6 +103,8 @@ volumes:
       type: none
       o: bind
       device: ${PAGES_DATA_DIR:-/data/gitea-pages}
+  deployer_data:
+    name: gitea-pages-deployer-data
   certs_data:
     name: gitea-pages-certs
 

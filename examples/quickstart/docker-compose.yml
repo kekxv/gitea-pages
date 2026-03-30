@@ -47,6 +47,7 @@ services:
       - WEBHOOK_SECRET=test-webhook-secret
       - WEBHOOK_PORT=8080
       - PAGES_DATA_DIR=/var/www/pages
+      - DEPLOYER_DATA_DIR=/var/lib/deployer
       - MAX_SITE_SIZE_MB=50
       - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
       - GITEA_API_URL=http://gitea:3000
@@ -58,6 +59,7 @@ services:
       - GITEA_PUBLIC_URL=${GITEA_PUBLIC_URL:-http://localhost:3000}
     volumes:
       - pages_data:/var/www/pages:rw
+      - deployer_data:/var/lib/deployer:rw
     ports:
       - "8080:8080"
     networks:
@@ -95,6 +97,7 @@ volumes:
   gitea_data:
   gitea_config:
   pages_data:
+  deployer_data:
 
 networks:
   pages_network:
