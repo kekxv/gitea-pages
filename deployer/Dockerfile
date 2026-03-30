@@ -2,7 +2,7 @@
 # Multi-stage build for minimal image, non-root user
 
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install build dependencies for sqlite3
 RUN apk add --no-cache gcc musl-dev
@@ -20,7 +20,7 @@ COPY *.go ./
 RUN CGO_ENABLED=1 go build -ldflags="-s -w -extldflags '-static'" -o deployer .
 
 # Final stage
-FROM alpine:3.19
+FROM alpine:3.21
 
 # Security: Create non-privileged user
 ARG PUID=1000
