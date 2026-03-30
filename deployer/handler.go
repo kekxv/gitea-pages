@@ -128,6 +128,13 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received webhook: repo=%s, ref=%s, pusher=%s",
 		payload.Repository.Name, payload.Ref, payload.Pusher.Login)
 
+	// Security: Validate clone URL to prevent token phishing
+	if !IsTrustedCloneURL(payload.Repository.CloneURL, d.config.GiteaAPIURL) {
+		log.Printf("Rejected untrusted clone URL: %s", payload.Repository.CloneURL)
+		http.Error(w, "Untrusted clone URL", http.StatusForbidden)
+		return
+	}
+
 	// Filter branch - only process gh-pages
 	if !IsGhPagesBranch(payload.Ref) {
 		log.Printf("Ignoring non-gh-pages branch: %s", payload.Ref)
@@ -223,7 +230,7 @@ func (d *Deployer) handleBranchDelete(username, repoName string) {
 
 	log.Printf("Removing site at: %s", targetPath)
 
-	if err := RemoveSite(targetPath); err != nil {
+	if err := d.gitOps.RemoveSite(targetPath); err != nil {
 		log.Printf("Failed to remove site: %v", err)
 	} else {
 		log.Printf("Successfully removed site for %s/%s", username, repoName)
@@ -253,30 +260,19 @@ func IsGhPagesBranch(ref string) bool {
 //   -> /pagesDir/username/_root
 // Sub site: other repos -> /pagesDir/username/repoName
 func CalculateTargetPath(pagesDir, username, repoName, domain string) string {
+	sUsername := SanitizePathComponent(username)
+	sRepoName := SanitizePathComponent(repoName)
+
 	// Check if this is a root site (GitHub-style: username.github.io)
 	// Format: username.pages.<anything> or username.pages.<domain>
 	pagesPrefix := fmt.Sprintf("%s.pages.", username)
 	isRootSite := strings.HasPrefix(repoName, pagesPrefix)
 
 	if isRootSite {
-		return fmt.Sprintf("%s/%s/_root", pagesDir, username)
+		return fmt.Sprintf("%s/%s/_root", pagesDir, sUsername)
 	}
 
-	return fmt.Sprintf("%s/%s/%s", pagesDir, username, SanitizePath(repoName))
-}
-
-// SanitizePath removes dangerous characters from path components
-func SanitizePath(path string) string {
-	// Remove path traversal attempts
-	path = strings.ReplaceAll(path, "..", "")
-	path = strings.ReplaceAll(path, "/", "")
-	path = strings.ReplaceAll(path, "\\", "")
-
-	// Remove leading/trailing dots and spaces
-	path = strings.TrimSpace(path)
-	path = strings.Trim(path, ".")
-
-	return path
+	return fmt.Sprintf("%s/%s/%s", pagesDir, sUsername, sRepoName)
 }
 
 // readBody reads request body safely with size limit

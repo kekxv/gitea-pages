@@ -91,27 +91,80 @@ func TestDetectSymlinks(t *testing.T) {
 }
 
 func TestValidatePath(t *testing.T) {
+	pagesDir := "/var/www/pages"
 	tests := []struct {
 		path     string
 		hasError bool
 	}{
 		{"/var/www/pages/user/repo", false},
-		{"user/repo", false},
+		{"/var/www/pages/user/repo/file.txt", false},
 		{"/etc/passwd", true},                        // outside allowed path
-		{"../traversal", true},                       // path traversal
-		{"../../etc/passwd", true},                   // path traversal
-		{"repo/../../../etc/passwd", true},           // path traversal
+		{"/var/www/pages/user/../../etc/passwd", true}, // path traversal
+		{"/var/www/pages/../pages/user", false},       // technically inside but cleaned
 		{"/var/www/pages/user\x00/repo", true},       // null byte
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			err := ValidatePath(tt.path)
+			err := ValidatePath(tt.path, pagesDir)
 			if tt.hasError && err == nil {
 				t.Errorf("ValidatePath(%s) should return error", tt.path)
 			}
 			if !tt.hasError && err != nil {
 				t.Errorf("ValidatePath(%s) should not return error: %v", tt.path, err)
+			}
+		})
+	}
+}
+
+func TestSanitizePathComponent(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"user123", "user123"},
+		{"user/../admin", "useradmin"},
+		{"repo.git", "repo.git"},
+		{"  spaces  ", "spaces"},
+		{"special!@#$%^&*()chars", "specialchars"},
+		{"..", ""},
+		{".../", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := SanitizePathComponent(tt.input)
+			if result != tt.expected {
+				t.Errorf("SanitizePathComponent(%s) = %v, expected %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSanitizeGitOutput(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{
+			"Cloning into 'temp'...\nfatal: unable to access 'https://my-token@gitea.com/user/repo.git/': 401",
+			"Cloning into 'temp'...\nfatal: unable to access 'https://***@gitea.com/user/repo.git/': 401",
+		},
+		{
+			"error: https://another-token:password@host.com/path",
+			"error: https://***@host.com/path",
+		},
+		{
+			"No token here: https://public-repo.com/",
+			"No token here: https://public-repo.com/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := SanitizeGitOutput(tt.input)
+			if result != tt.expected {
+				t.Errorf("SanitizeGitOutput() = %v, expected %v", result, tt.expected)
 			}
 		})
 	}

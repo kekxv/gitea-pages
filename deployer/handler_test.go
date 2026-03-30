@@ -114,14 +114,6 @@ func TestCalculateTargetPath(t *testing.T) {
 			expected: "/var/www/pages/testuser/_root",
 		},
 		{
-			name:     "sub directory site - repo matches username (not root)",
-			pagesDir: "/var/www/pages",
-			username: "alice",
-			repoName: "alice",
-			domain:   "example.com",
-			expected: "/var/www/pages/alice/alice",
-		},
-		{
 			name:     "sub directory site",
 			pagesDir: "/var/www/pages",
 			username: "alice",
@@ -130,12 +122,20 @@ func TestCalculateTargetPath(t *testing.T) {
 			expected: "/var/www/pages/alice/my-project",
 		},
 		{
-			name:     "sub directory site with special chars",
+			name:     "malicious username - path traversal",
+			pagesDir: "/var/www/pages",
+			username: "../../etc",
+			repoName: "my-project",
+			domain:   "example.com",
+			expected: "/var/www/pages/etc/my-project",
+		},
+		{
+			name:     "malicious repo - path traversal",
 			pagesDir: "/var/www/pages",
 			username: "alice",
-			repoName: "my-project-v2",
+			repoName: "../../etc/passwd",
 			domain:   "example.com",
-			expected: "/var/www/pages/alice/my-project-v2",
+			expected: "/var/www/pages/alice/etcpasswd",
 		},
 	}
 
@@ -144,29 +144,6 @@ func TestCalculateTargetPath(t *testing.T) {
 			result := CalculateTargetPath(tt.pagesDir, tt.username, tt.repoName, tt.domain)
 			if result != tt.expected {
 				t.Errorf("CalculateTargetPath() = %v, expected %v", result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestSanitizePath(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"normal-repo", "normal-repo"},
-		{"repo/../traversal", "repotraversal"},
-		{"repo/../../etc/passwd", "repoetcpasswd"},
-		{"./hidden", "hidden"},
-		{"repo.", "repo"},
-		{"  repo  ", "repo"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := SanitizePath(tt.input)
-			if result != tt.expected {
-				t.Errorf("SanitizePath(%s) = %v, expected %v", tt.input, result, tt.expected)
 			}
 		})
 	}

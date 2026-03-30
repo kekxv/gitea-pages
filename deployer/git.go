@@ -83,9 +83,14 @@ func (g *GitOperations) Deploy(cloneURL, targetPath string, owner, repo string) 
 	}
 	maxSizeBytes := g.maxSiteSizeMB * 1024 * 1024
 	if sizeBytes > maxSizeBytes {
-		return fmt.Errorf("site size %d MB exceeds maximum allowed %d MB (ref: https://docs.github.com/en/pages/getting-started-with-github-pages/about-github-pages#limits-on-use-of-github-pages)", sizeBytes/1024/1024, g.maxSiteSizeMB)
+		return fmt.Errorf("site size %d MB exceeds maximum allowed %d MB", sizeBytes/1024/1024, g.maxSiteSizeMB)
 	}
 	log.Printf("Site size: %d MB (limit: %d MB)", sizeBytes/1024/1024, g.maxSiteSizeMB)
+
+	// Security: Validate target path
+	if err := ValidatePath(targetPath, g.pagesDir); err != nil {
+		return fmt.Errorf("invalid target path: %w", err)
+	}
 
 	// Ensure target directory parent exists
 	parentDir := filepath.Dir(targetPath)
@@ -93,7 +98,7 @@ func (g *GitOperations) Deploy(cloneURL, targetPath string, owner, repo string) 
 		return fmt.Errorf("failed to create parent dir: %w", err)
 	}
 
-	// Clean existing target directory if exists (old version cleanup)
+	// Clean existing target directory if exists
 	if err := CleanTargetDir(targetPath); err != nil {
 		return fmt.Errorf("failed to clean target dir: %w", err)
 	}
@@ -161,6 +166,11 @@ func (g *GitOperations) DeployWithToken(cloneURL, targetPath string, owner, repo
 	}
 	log.Printf("Site size: %d MB (limit: %d MB)", sizeBytes/1024/1024, g.maxSiteSizeMB)
 
+	// Security: Validate target path
+	if err := ValidatePath(targetPath, g.pagesDir); err != nil {
+		return fmt.Errorf("invalid target path: %w", err)
+	}
+
 	// Ensure target directory parent exists
 	parentDir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
@@ -196,6 +206,7 @@ func (g *GitOperations) cloneRepo(cloneURL, targetDir, sshKeyPath string) error 
 		"--branch", "gh-pages",
 		"--single-branch",
 		"--depth", "1",
+		"--",
 		cloneURL,
 		targetDir,
 	)
@@ -216,8 +227,9 @@ func (g *GitOperations) cloneRepo(cloneURL, targetDir, sshKeyPath string) error 
 	cmd.Env = cmdEnv
 
 	output, err := cmd.CombinedOutput()
+	sanitizedOutput := SanitizeGitOutput(string(output))
 	if err != nil {
-		return fmt.Errorf("git clone failed: %w, output: %s", err, string(output))
+		return fmt.Errorf("git clone failed: %w, output: %s", err, sanitizedOutput)
 	}
 
 	return nil
@@ -342,37 +354,17 @@ func CalculateDirSize(dirPath string) (int64, error) {
 }
 
 // RemoveSite removes a deployed site directory
-func RemoveSite(targetPath string) error {
+func (g *GitOperations) RemoveSite(targetPath string) error {
 	// Check if path exists
 	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
 		return nil // Directory doesn't exist, nothing to remove
 	}
 
 	// Security: Verify the path is within pages directory
-	// This prevents accidental deletion of system files
-	if !isSafePath(targetPath) {
-		return fmt.Errorf("unsafe path detected: %s", targetPath)
+	if err := ValidatePath(targetPath, g.pagesDir); err != nil {
+		return fmt.Errorf("unsafe path detected: %w", err)
 	}
 
 	// Remove the entire directory
 	return os.RemoveAll(targetPath)
-}
-
-// isSafePath checks if the path is within allowed pages directory
-func isSafePath(path string) bool {
-	// Normalize path
-	normalized := filepath.Clean(path)
-
-	// Check for path traversal
-	if strings.Contains(normalized, "..") {
-		return false
-	}
-
-	// Must be absolute path starting with pages directory prefix
-	// This is a basic check; in production you'd want more rigorous validation
-	if !strings.HasPrefix(normalized, "/var/www/pages/") {
-		return false
-	}
-
-	return true
 }

@@ -57,6 +57,28 @@ func TestPrepareCloneURL(t *testing.T) {
 	}
 }
 
+func TestIsTrustedCloneURL(t *testing.T) {
+	trustedAPI := "https://gitea.example.com/api/v1"
+	tests := []struct {
+		name     string
+		cloneURL string
+		expected bool
+	}{
+		{"trusted", "https://gitea.example.com/user/repo.git", true},
+		{"untrusted", "https://attacker.com/user/repo.git", false},
+		{"subdomain (untrusted by default)", "https://sub.gitea.example.com/user/repo.git", false},
+		{"internal", "http://localhost:3000/user/repo.git", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsTrustedCloneURL(tt.cloneURL, trustedAPI); got != tt.expected {
+				t.Errorf("IsTrustedCloneURL() = %v, expected %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestGiteaClient_GetRepoInfo(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/repos/testuser/test-repo" {

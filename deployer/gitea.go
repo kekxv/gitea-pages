@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,62 +100,48 @@ func (c *GiteaClient) CheckRepoSizeBeforeClone(owner, repo string, maxSizeBytes 
 	return nil
 }
 
+// IsTrustedCloneURL verifies if the clone URL belongs to the configured Gitea host
+func IsTrustedCloneURL(cloneURL, trustedAPIURL string) bool {
+	if trustedAPIURL == "" {
+		return true // No API URL configured, cannot verify (legacy mode)
+	}
+
+	parsedClone, err := url.Parse(cloneURL)
+	if err != nil {
+		return false
+	}
+
+	parsedTrusted, err := url.Parse(trustedAPIURL)
+	if err != nil {
+		return false
+	}
+
+	return parsedClone.Host == parsedTrusted.Host
+}
+
 // PrepareCloneURL prepares authenticated clone URL
 func PrepareCloneURL(cloneURL string, accessToken string, sshKeyPath string) (string, error) {
+	parsed, err := url.Parse(cloneURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid clone URL: %w", err)
+	}
+
 	// If SSH key is configured, convert HTTPS URL to SSH
 	if sshKeyPath != "" {
-		if strings.HasPrefix(cloneURL, "https://") {
-			parsed, err := parseURL(cloneURL)
-			if err != nil {
-				return "", err
-			}
+		if parsed.Scheme == "https" {
 			sshURL := fmt.Sprintf("git@%s:%s", parsed.Host, strings.TrimPrefix(parsed.Path, "/"))
 			return sshURL, nil
 		}
 	}
 
 	// Use access token for HTTPS clone
-	if accessToken != "" && strings.HasPrefix(cloneURL, "https://") {
-		parsed, err := parseURL(cloneURL)
-		if err != nil {
-			return "", err
-		}
-		authURL := fmt.Sprintf("https://%s@%s%s", accessToken, parsed.Host, parsed.Path)
-		return authURL, nil
+	if accessToken != "" && parsed.Scheme == "https" {
+		// Set user as token for Basic Auth
+		parsed.User = url.User(accessToken)
+		return parsed.String(), nil
 	}
 
 	return cloneURL, nil
-}
-
-func parseURL(rawURL string) (struct {
-	Scheme string
-	Host   string
-	Path   string
-}, error) {
-	var result struct {
-		Scheme string
-		Host   string
-		Path   string
-	}
-
-	idx := strings.Index(rawURL, "://")
-	if idx == -1 {
-		return result, fmt.Errorf("invalid URL: %s", rawURL)
-	}
-
-	result.Scheme = rawURL[:idx]
-	rest := rawURL[idx+3:]
-
-	slashIdx := strings.Index(rest, "/")
-	if slashIdx == -1 {
-		result.Host = rest
-		result.Path = ""
-	} else {
-		result.Host = rest[:slashIdx]
-		result.Path = rest[slashIdx:]
-	}
-
-	return result, nil
 }
 
 // SetupSSHKey prepares SSH key for git operations

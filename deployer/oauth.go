@@ -143,14 +143,14 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Determine redirect URL based on request Host
 	host := r.Host
 	redirectURL := h.config.RedirectURL
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	scheme := "http"
+	if isSecure {
+		scheme = "https"
+	}
 
 	// If request comes from a different host, construct redirect URL from request
 	if host != "" && !strings.Contains(h.config.RedirectURL, host) {
-		// Extract scheme (assume http for now, could check X-Forwarded-Proto)
-		scheme := "http"
-		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-			scheme = "https"
-		}
 		redirectURL = fmt.Sprintf("%s://%s/oauth/callback", scheme, host)
 	}
 
@@ -161,6 +161,8 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   300, // 5 minutes
 		HttpOnly: true,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oauth_redirect",
@@ -168,6 +170,8 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   300,
 		HttpOnly: true,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	// Use PublicAuthURL for browser redirect (different from internal AuthURL)

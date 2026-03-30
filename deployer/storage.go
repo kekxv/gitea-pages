@@ -51,6 +51,8 @@ func NewTokenStore(dataDir string) *TokenStore {
 
 // initDB initializes the SQLite database
 func (s *TokenStore) initDB() error {
+	// Set umask for this process to ensure new files have restricted permissions
+	// Alternatively, we can just Chmod after creation.
 	db, err := sql.Open("sqlite3", s.dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -62,6 +64,11 @@ func (s *TokenStore) initDB() error {
 	}
 
 	s.db = db
+
+	// Restrict database file permissions
+	if err := os.Chmod(s.dbPath, 0600); err != nil {
+		log.Printf("Warning: Failed to set database permissions: %v", err)
+	}
 
 	// Create table if not exists
 	createTableSQL := `
