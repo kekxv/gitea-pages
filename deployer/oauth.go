@@ -395,11 +395,19 @@ type WebhookRegistrationResult struct {
 	OrgWebhookErrors  []string
 	OrgsFound         int
 	HasScopeError     bool
+	Success           bool
+	Message           string
 }
 
 // registerWebhooks registers webhooks at user level and organization level
 func (h *OAuthHandler) registerWebhooks(userToken *UserToken) {
 	result := h.registerWebhooksWithResult(userToken)
+
+	// Store result in token store for status page to display
+	if h.store != nil {
+		h.store.SetRegistrationResult(userToken.Username, result)
+	}
+
 	if result.HasScopeError {
 		log.Printf("Warning: Scope permission issue detected for %s", userToken.Username)
 	}
@@ -457,6 +465,20 @@ func (h *OAuthHandler) registerWebhooksWithResult(userToken *UserToken) *Webhook
 				log.Printf("Organization webhook registered for %s", org)
 			}
 		}
+	}
+
+	// Set success status and message
+	result.Success = !result.HasScopeError && result.UserWebhookError == "" && len(result.OrgWebhookErrors) == 0
+	if result.HasScopeError {
+		result.Message = "权限不足，请在 Gitea 中撤销授权后重新授权"
+	} else if result.UserWebhookError != "" {
+		result.Message = "用户级 Webhook 注册失败: " + result.UserWebhookError
+	} else if len(result.OrgWebhookErrors) > 0 {
+		result.Message = fmt.Sprintf("部分组织 Webhook 注册失败 (%d/%d)", len(result.OrgWebhookErrors), result.OrgsFound)
+	} else if result.OrgsFound > 0 {
+		result.Message = fmt.Sprintf("Webhook 注册成功 (用户 + %d 个组织)", result.OrgsFound)
+	} else {
+		result.Message = "用户级 Webhook 注册成功"
 	}
 
 	return result

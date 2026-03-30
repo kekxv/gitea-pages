@@ -162,12 +162,15 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Deploying to: %s", targetPath)
 
-	// Get user token for private repo access (if OAuth is enabled)
+	// Get user token for clone authentication (if OAuth is enabled)
+	// Try to use OAuth token even for public repos, as Gitea may require auth for all clones
 	userToken := ""
-	if d.tokenStore != nil && payload.Repository.Private {
+	if d.tokenStore != nil {
 		userToken = d.tokenStore.GetTokenForRepo(payload.Repository.Owner.Username)
 		if userToken != "" {
 			log.Printf("Using OAuth token for user: %s", payload.Repository.Owner.Username)
+		} else if payload.Repository.Private {
+			log.Printf("Warning: Private repo but no OAuth token for user: %s", payload.Repository.Owner.Username)
 		}
 	}
 

@@ -15,10 +15,11 @@ import (
 
 // TokenStore stores user tokens with SQLite persistence
 type TokenStore struct {
-	mu     sync.RWMutex
-	tokens map[string]*UserToken
-	db     *sql.DB
-	dbPath string
+	mu            sync.RWMutex
+	tokens        map[string]*UserToken
+	registrationResults map[string]*WebhookRegistrationResult // In-memory only, updated async
+	db            *sql.DB
+	dbPath        string
 }
 
 // NewTokenStore creates a new token store with SQLite persistence
@@ -31,8 +32,9 @@ func NewTokenStore(dataDir string) *TokenStore {
 	dbPath := filepath.Join(dataDir, "tokens.db")
 
 	store := &TokenStore{
-		tokens: make(map[string]*UserToken),
-		dbPath: dbPath,
+		tokens:              make(map[string]*UserToken),
+		registrationResults: make(map[string]*WebhookRegistrationResult),
+		dbPath:              dbPath,
 	}
 
 	// Initialize database
@@ -239,4 +241,18 @@ func (s *TokenStore) Close() error {
 		return s.db.Close()
 	}
 	return nil
+}
+
+// SetRegistrationResult stores the webhook registration result for a user
+func (s *TokenStore) SetRegistrationResult(username string, result *WebhookRegistrationResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registrationResults[username] = result
+}
+
+// GetRegistrationResult retrieves the webhook registration result for a user
+func (s *TokenStore) GetRegistrationResult(username string) *WebhookRegistrationResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registrationResults[username]
 }

@@ -55,12 +55,24 @@ func (h *WebHandler) HandleIndex(w http.ResponseWriter, r *http.Request) {
 
 // HandleStatus shows authorization status
 func (h *WebHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	users := []string{}
+	type UserInfo struct {
+		Username      string
+		MaskedName    string
+		Initial       string
+		RegResult     *WebhookRegistrationResult
+	}
+
+	users := []UserInfo{}
 
 	if h.tokenStore != nil {
 		h.tokenStore.mu.RLock()
 		for username := range h.tokenStore.tokens {
-			users = append(users, username)
+			users = append(users, UserInfo{
+				Username:   username,
+				MaskedName: maskUsername(username),
+				Initial:    string([]rune(username)[0]),
+				RegResult:  h.tokenStore.GetRegistrationResult(username),
+			})
 		}
 		h.tokenStore.mu.RUnlock()
 	}
@@ -85,11 +97,16 @@ func (h *WebHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
         .stat { flex: 1; background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; text-align: center; }
         .stat-number { font-size: 36px; font-weight: bold; color: #3b82f6; }
         .stat-label { color: #6b7280; font-size: 14px; margin-top: 4px; }
-        .user-list { display: flex; flex-wrap: wrap; gap: 12px; }
-        .user { display: inline-flex; align-items: center; gap: 8px; background: white; border: 1px solid #e5e7eb; padding: 12px 16px; border-radius: 8px; }
-        .user-avatar { width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 50%%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px; }
-        .user-name { font-weight: 500; color: #1f2937; }
-        .user-status { width: 8px; height: 8px; background: #22c55e; border-radius: 50%%; }
+        .user-list { display: flex; flex-direction: column; gap: 12px; }
+        .user { display: flex; align-items: center; gap: 12px; background: white; border: 1px solid #e5e7eb; padding: 16px; border-radius: 8px; }
+        .user-avatar { width: 40px; height: 40px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 50%%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 16px; flex-shrink: 0; }
+        .user-info { flex: 1; }
+        .user-name { font-weight: 600; color: #1f2937; font-size: 16px; }
+        .user-status { font-size: 13px; margin-top: 4px; }
+        .status-success { color: #16a34a; }
+        .status-warning { color: #d97706; }
+        .status-error { color: #dc2626; }
+        .status-pending { color: #6b7280; }
         .empty-state { text-align: center; padding: 40px 20px; color: #6b7280; }
         .empty-icon { font-size: 48px; margin-bottom: 16px; }
         .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 20px 0; }
@@ -130,14 +147,29 @@ func (h *WebHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	if len(users) > 0 {
 		w.Write([]byte(`<div class="user-list">`))
 		for _, user := range users {
-			maskedUser := maskUsername(user)
-			initial := string([]rune(user)[0])
+			// Determine status class and text based on registration result
+			var statusClass, statusText string
+			if user.RegResult == nil {
+				statusClass = "status-pending"
+				statusText = "⏳ 正在注册 Webhook..."
+			} else if user.RegResult.Success {
+				statusClass = "status-success"
+				statusText = "✓ " + user.RegResult.Message
+			} else if user.RegResult.HasScopeError {
+				statusClass = "status-error"
+				statusText = "✗ " + user.RegResult.Message
+			} else {
+				statusClass = "status-warning"
+				statusText = "⚠ " + user.RegResult.Message
+			}
 			fmt.Fprintf(w, `
                 <div class="user">
                     <div class="user-avatar">%s</div>
-                    <span class="user-name">%s</span>
-                    <span class="user-status" title="Active"></span>
-                </div>`, initial, maskedUser)
+                    <div class="user-info">
+                        <span class="user-name">%s</span>
+                        <span class="user-status %s">%s</span>
+                    </div>
+                </div>`, user.Initial, user.MaskedName, statusClass, statusText)
 		}
 		w.Write([]byte(`</div>`))
 	} else {
