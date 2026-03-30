@@ -252,53 +252,12 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	h.store.Set(userToken.Username, userToken)
 
-	// Register webhooks synchronously to check for permission issues
-	result := h.registerWebhooksWithResult(userToken)
+	// Register webhooks asynchronously to avoid timeout for users with many organizations
+	go h.registerWebhooks(userToken)
 
-	// Show success page with permission warnings if needed
+	// Show success page immediately
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	if result.HasScopeError {
-		fmt.Fprintf(w, `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>授权成功 - 权限不足</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 80px auto; padding: 20px; text-align: center; }
-        .warning { color: #f59e0b; font-size: 64px; }
-        h1 { color: #1f2937; }
-        .info { background: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .error-box { background: #fef3c7; border: 1px solid #f59e0b; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .error-box h2 { color: #b45309; margin: 0 0 12px 0; }
-        .error-box p { color: #92400e; margin: 8px 0; font-size: 14px; }
-        .error-box ul { color: #92400e; margin: 8px 0; padding-left: 20px; font-size: 14px; }
-        a { color: #3b82f6; }
-        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
-    </style>
-</head>
-<body>
-    <div class="warning">⚠</div>
-    <h1>授权成功，但权限不足</h1>
-    <div class="info">
-        <p><strong>用户:</strong> %s</p>
-    </div>
-    <div class="error-box">
-        <h2>权限问题</h2>
-        <p>Webhook 注册失败，需要以下权限：</p>
-        <ul>
-            <li><code>write:user</code> - 注册用户级 Webhook</li>
-            <li><code>write:organization</code> - 注册组织级 Webhook</li>
-        </ul>
-        <p><strong>解决方法：</strong></p>
-        <p>请在 Gitea 中撤销此应用的授权，然后重新授权。</p>
-    </div>
-    <p><a href="/oauth/start">重新授权</a> | <a href="/">返回首页</a></p>
-</body>
-</html>
-`, userToken.Username)
-	} else {
-		fmt.Fprintf(w, `
+	fmt.Fprintf(w, `
 <!DOCTYPE html>
 <html>
 <head>
@@ -311,6 +270,7 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
         .status { background: #dbeafe; border: 1px solid #3b82f6; padding: 16px; border-radius: 8px; margin: 16px 0; }
         .status p { margin: 4px 0; color: #1e40af; }
         a { color: #3b82f6; }
+        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
     </style>
 </head>
 <body>
@@ -320,20 +280,14 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
         <p><strong>用户:</strong> %s</p>
     </div>
     <div class="status">
-        <p>✓ 用户级 Webhook 已注册</p>
-        %s
+        <p>⏳ 正在后台注册 Webhook...</p>
+        <p style="font-size: 12px; color: #6b7280;">如果您的组织较多，可能需要几秒钟</p>
     </div>
     <p>现在你可以推送代码到 <code>gh-pages</code> 分支来自动部署你的网站了。</p>
     <p><a href="/">返回首页</a> | <a href="/status">查看状态</a></p>
 </body>
 </html>
-`, userToken.Username, func() string {
-			if result.OrgsFound > 0 {
-				return fmt.Sprintf("<p>✓ 组织级 Webhook 已注册 (%d 个组织)</p>", result.OrgsFound)
-			}
-			return "<p>暂无组织</p>"
-		}())
-	}
+`, userToken.Username)
 }
 
 // OAuthTokenResponse represents the token response

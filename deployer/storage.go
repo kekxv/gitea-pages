@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -51,15 +52,24 @@ func NewTokenStore(dataDir string) *TokenStore {
 
 // initDB initializes the SQLite database
 func (s *TokenStore) initDB() error {
-	// Set umask for this process to ensure new files have restricted permissions
-	// Alternatively, we can just Chmod after creation.
-	db, err := sql.Open("sqlite3", s.dbPath)
+	// Use SQLite connection string with busy_timeout to avoid blocking
+	// _busy_timeout=5000 means wait up to 5 seconds if database is locked
+	dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL", s.dbPath)
+
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Test connection
-	if err := db.Ping(); err != nil {
+	// Set connection pool settings for SQLite
+	db.SetMaxOpenConns(1) // SQLite works best with single connection
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0) // Don't close connections
+
+	// Test connection with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
@@ -96,7 +106,10 @@ func (s *TokenStore) loadFromDB() error {
 		return nil
 	}
 
-	rows, err := s.db.Query(`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT username, access_token, token_type, expires_at, created_at
 		FROM user_tokens
 	`)
@@ -147,7 +160,8 @@ func (s *TokenStore) Set(username string, token *UserToken) {
 
 	// Update database
 	if s.db != nil {
-		_, err := s.db.Exec(`
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := s.db.ExecContext(ctx, `
 			INSERT OR REPLACE INTO user_tokens
 			(username, access_token, token_type, expires_at, created_at)
 			VALUES (?, ?, ?, ?, ?)
@@ -158,6 +172,7 @@ func (s *TokenStore) Set(username string, token *UserToken) {
 			token.ExpiresAt,
 			token.CreatedAt,
 		)
+		cancel()
 		if err != nil {
 			log.Printf("Warning: Failed to save token to database: %v", err)
 		} else {
@@ -197,7 +212,9 @@ func (s *TokenStore) Delete(username string) {
 	delete(s.tokens, username)
 
 	if s.db != nil {
-		_, err := s.db.Exec("DELETE FROM user_tokens WHERE username = ?", username)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := s.db.ExecContext(ctx, "DELETE FROM user_tokens WHERE username = ?", username)
+		cancel()
 		if err != nil {
 			log.Printf("Warning: Failed to delete token from database: %v", err)
 		}
