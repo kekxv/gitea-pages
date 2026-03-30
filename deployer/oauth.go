@@ -664,8 +664,9 @@ func (h *OAuthHandler) registerOrgWebhook(token, org string) error {
 			"content_type": "json",
 			"secret":       h.secret,
 		},
-		"events": []string{"push", "delete"},
-		"active": true,
+		"events":       []string{"push", "delete"},
+		"active":       true,
+		"branch_filter": "gh-pages", // Only trigger on gh-pages branch
 	}
 
 	body, err := json.Marshal(payload)
@@ -721,8 +722,9 @@ func (h *OAuthHandler) registerUserWebhook(token string) error {
 			"content_type": "json",
 			"secret":       h.secret,
 		},
-		"events": []string{"push", "delete"},
-		"active": true,
+		"events":       []string{"push", "delete"},
+		"active":       true,
+		"branch_filter": "gh-pages", // Only trigger on gh-pages branch
 	}
 
 	body, err := json.Marshal(payload)
