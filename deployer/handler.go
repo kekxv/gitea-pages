@@ -164,9 +164,10 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Get user token for clone authentication (if OAuth is enabled)
 	// Try to use OAuth token even for public repos, as Gitea may require auth for all clones
+	// Username is normalized to lowercase for consistent token lookup
 	userToken := ""
 	if d.tokenStore != nil {
-		userToken = d.tokenStore.GetTokenForRepo(payload.Repository.Owner.Username)
+		userToken = d.tokenStore.GetTokenForRepo(strings.ToLower(payload.Repository.Owner.Username))
 		if userToken != "" {
 			log.Printf("Using OAuth token for user: %s", payload.Repository.Owner.Username)
 		} else if payload.Repository.Private {
@@ -262,14 +263,17 @@ func IsGhPagesBranch(ref string) bool {
 // Root site: repoName starts with "username.pages." (GitHub-style: username.github.io)
 //   -> /pagesDir/username/_root
 // Sub site: other repos -> /pagesDir/username/repoName
+// Note: username is normalized to lowercase for domain compatibility
 func CalculateTargetPath(pagesDir, username, repoName, domain string) string {
-	sUsername := SanitizePathComponent(username)
+	// Normalize username to lowercase (domains are case-insensitive)
+	normalizedUsername := strings.ToLower(username)
+	sUsername := SanitizePathComponent(normalizedUsername)
 	sRepoName := SanitizePathComponent(repoName)
 
 	// Check if this is a root site (GitHub-style: username.github.io)
 	// Format: username.pages.<anything> or username.pages.<domain>
-	pagesPrefix := fmt.Sprintf("%s.pages.", username)
-	isRootSite := strings.HasPrefix(repoName, pagesPrefix)
+	pagesPrefix := fmt.Sprintf("%s.pages.", normalizedUsername)
+	isRootSite := strings.HasPrefix(strings.ToLower(repoName), pagesPrefix)
 
 	if isRootSite {
 		return fmt.Sprintf("%s/%s/_root", pagesDir, sUsername)

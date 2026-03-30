@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,12 +154,17 @@ func (s *TokenStore) loadFromDB() error {
 }
 
 // Set stores a user token (in memory and database)
+// Username is normalized to lowercase for consistent lookup
 func (s *TokenStore) Set(username string, token *UserToken) {
+	// Normalize username to lowercase
+	normalizedUsername := strings.ToLower(username)
+	token.Username = normalizedUsername
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Update memory
-	s.tokens[username] = token
+	s.tokens[normalizedUsername] = token
 
 	// Update database
 	if s.db != nil {
@@ -168,7 +174,7 @@ func (s *TokenStore) Set(username string, token *UserToken) {
 			(username, access_token, token_type, expires_at, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`,
-			token.Username,
+			normalizedUsername,
 			token.AccessToken,
 			token.TokenType,
 			token.ExpiresAt,
@@ -178,27 +184,30 @@ func (s *TokenStore) Set(username string, token *UserToken) {
 		if err != nil {
 			log.Printf("Warning: Failed to save token to database: %v", err)
 		} else {
-			log.Printf("Token saved to database for user: %s", username)
+			log.Printf("Token saved to database for user: %s", normalizedUsername)
 		}
 	}
 }
 
-// Get retrieves a user token
+// Get retrieves a user token (username normalized to lowercase)
 func (s *TokenStore) Get(username string) *UserToken {
+	normalizedUsername := strings.ToLower(username)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.tokens[username]
+	return s.tokens[normalizedUsername]
 }
 
 // GetTokenForRepo returns the access token for a repository owner
 // SECURITY: Also checks if token has expired
+// Username is normalized to lowercase for consistent lookup
 func (s *TokenStore) GetTokenForRepo(owner string) string {
+	normalizedOwner := strings.ToLower(owner)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if token, ok := s.tokens[owner]; ok {
+	if token, ok := s.tokens[normalizedOwner]; ok {
 		// Check if token has expired
 		if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
-			log.Printf("Token for %s has expired", owner)
+			log.Printf("Token for %s has expired", normalizedOwner)
 			return ""
 		}
 		return token.AccessToken
@@ -206,16 +215,17 @@ func (s *TokenStore) GetTokenForRepo(owner string) string {
 	return ""
 }
 
-// Delete removes a user token
+// Delete removes a user token (username normalized to lowercase)
 func (s *TokenStore) Delete(username string) {
+	normalizedUsername := strings.ToLower(username)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.tokens, username)
+	delete(s.tokens, normalizedUsername)
 
 	if s.db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := s.db.ExecContext(ctx, "DELETE FROM user_tokens WHERE username = ?", username)
+		_, err := s.db.ExecContext(ctx, "DELETE FROM user_tokens WHERE username = ?", normalizedUsername)
 		cancel()
 		if err != nil {
 			log.Printf("Warning: Failed to delete token from database: %v", err)
@@ -244,15 +254,19 @@ func (s *TokenStore) Close() error {
 }
 
 // SetRegistrationResult stores the webhook registration result for a user
+// Username is normalized to lowercase
 func (s *TokenStore) SetRegistrationResult(username string, result *WebhookRegistrationResult) {
+	normalizedUsername := strings.ToLower(username)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.registrationResults[username] = result
+	s.registrationResults[normalizedUsername] = result
 }
 
 // GetRegistrationResult retrieves the webhook registration result for a user
+// Username is normalized to lowercase
 func (s *TokenStore) GetRegistrationResult(username string) *WebhookRegistrationResult {
+	normalizedUsername := strings.ToLower(username)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.registrationResults[username]
+	return s.registrationResults[normalizedUsername]
 }

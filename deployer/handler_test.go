@@ -137,6 +137,22 @@ func TestCalculateTargetPath(t *testing.T) {
 			domain:   "example.com",
 			expected: "/var/www/pages/alice/etcpasswd",
 		},
+		{
+			name:     "uppercase username - normalized to lowercase",
+			pagesDir: "/var/www/pages",
+			username: "Caesar",
+			repoName: "my-project",
+			domain:   "example.com",
+			expected: "/var/www/pages/caesar/my-project",
+		},
+		{
+			name:     "uppercase username root site - normalized",
+			pagesDir: "/var/www/pages",
+			username: "Caesar",
+			repoName: "Caesar.pages.example.com",
+			domain:   "example.com",
+			expected: "/var/www/pages/caesar/_root",
+		},
 	}
 
 	for _, tt := range tests {
