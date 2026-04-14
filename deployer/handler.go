@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -162,16 +163,47 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Deploying to: %s", targetPath)
 
+	// Extract user info from Authorization header (set during webhook registration)
+	// This solves the issue where org repos have Owner.Username = org name, not user name
+	var webhookUser string
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		encoded := strings.TrimPrefix(authHeader, "Bearer ")
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err == nil {
+			var userInfo struct {
+				Username string `json:"username"`
+			}
+			if json.Unmarshal(decoded, &userInfo) == nil && userInfo.Username != "" {
+				webhookUser = strings.ToLower(userInfo.Username)
+				log.Printf("Webhook from user: %s", webhookUser)
+			}
+		}
+	}
+
 	// Get user token for clone authentication (if OAuth is enabled)
-	// Try to use OAuth token even for public repos, as Gitea may require auth for all clones
-	// Username is normalized to lowercase for consistent token lookup
+	// Prefer username from Authorization header (for org repos), fallback to Owner
 	userToken := ""
 	if d.tokenStore != nil {
-		userToken = d.tokenStore.GetTokenForRepo(strings.ToLower(payload.Repository.Owner.Username))
-		if userToken != "" {
-			log.Printf("Using OAuth token for user: %s", payload.Repository.Owner.Username)
-		} else if payload.Repository.Private {
-			log.Printf("Warning: Private repo but no OAuth token for user: %s", payload.Repository.Owner.Username)
+		if webhookUser != "" {
+			userToken = d.tokenStore.GetTokenForRepo(webhookUser)
+			if userToken != "" {
+				log.Printf("Using OAuth token for user: %s", webhookUser)
+			}
+		}
+		// Fallback to Owner.Username if no token found from header
+		if userToken == "" {
+			userToken = d.tokenStore.GetTokenForRepo(strings.ToLower(payload.Repository.Owner.Username))
+			if userToken != "" {
+				log.Printf("Using OAuth token for owner: %s", payload.Repository.Owner.Username)
+			}
+		}
+		if userToken == "" && payload.Repository.Private {
+			if webhookUser != "" {
+				log.Printf("Warning: Private repo but no OAuth token for user: %s", webhookUser)
+			} else {
+				log.Printf("Warning: Private repo but no OAuth token for owner: %s", payload.Repository.Owner.Username)
+			}
 		}
 	}
 
