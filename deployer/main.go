@@ -134,6 +134,7 @@ func main() {
 
 		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, config.WebhookSecret)
 		webHandler.oauthConfig = oauthConfig
+		deployer.SetOAuthHandler(oauthHandler)
 	}
 
 	// Setup routes

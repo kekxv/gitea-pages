@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // GiteaWebhookPayload represents Gitea webhook push payload
@@ -65,9 +66,10 @@ type GiteaDeletePayload struct {
 
 // Deployer handles webhook requests and deployment
 type Deployer struct {
-	config     *Config
-	gitOps     *GitOperations
-	tokenStore *TokenStore // For OAuth user tokens
+	config       *Config
+	gitOps       *GitOperations
+	tokenStore   *TokenStore   // For OAuth user tokens
+	oauthHandler *OAuthHandler // For token refresh
 }
 
 // NewDeployer creates a new Deployer instance
@@ -81,6 +83,58 @@ func NewDeployer(config *Config) *Deployer {
 // SetTokenStore sets the token store for OAuth user tokens
 func (d *Deployer) SetTokenStore(store *TokenStore) {
 	d.tokenStore = store
+}
+
+// SetOAuthHandler sets the OAuth handler for token refresh
+func (d *Deployer) SetOAuthHandler(handler *OAuthHandler) {
+	d.oauthHandler = handler
+}
+
+// getTokenWithRefresh gets a valid access token, refreshing if expired
+// Returns the access token or empty string if unavailable
+func (d *Deployer) getTokenWithRefresh(username string) string {
+	if d.tokenStore == nil || username == "" {
+		return ""
+	}
+
+	normalizedUsername := strings.ToLower(username)
+	token := d.tokenStore.Get(normalizedUsername)
+	if token == nil {
+		return ""
+	}
+
+	// Check if token is expired
+	if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
+		log.Printf("Token for %s has expired, attempting refresh", normalizedUsername)
+
+		// Try to refresh if we have a refresh token and oauth handler
+		if token.RefreshToken != "" && d.oauthHandler != nil {
+			newToken, err := d.oauthHandler.refreshAccessToken(token.RefreshToken)
+			if err != nil {
+				log.Printf("Failed to refresh token for %s: %v", normalizedUsername, err)
+				return ""
+			}
+
+			// Update token in store
+			token.AccessToken = newToken.AccessToken
+			token.TokenType = newToken.TokenType
+			if newToken.RefreshToken != "" {
+				token.RefreshToken = newToken.RefreshToken
+			}
+			if newToken.ExpiresIn > 0 {
+				token.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+			}
+			d.tokenStore.Set(normalizedUsername, token)
+
+			log.Printf("Token refreshed successfully for %s", normalizedUsername)
+			return token.AccessToken
+		}
+
+		log.Printf("No refresh token available for %s", normalizedUsername)
+		return ""
+	}
+
+	return token.AccessToken
 }
 
 // HandleWebhook processes Gitea push and delete webhooks
@@ -183,17 +237,18 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Get user token for clone authentication (if OAuth is enabled)
 	// Prefer username from Authorization header (for org repos), fallback to Owner
+	// This method will attempt to refresh expired tokens
 	userToken := ""
 	if d.tokenStore != nil {
 		if webhookUser != "" {
-			userToken = d.tokenStore.GetTokenForRepo(webhookUser)
+			userToken = d.getTokenWithRefresh(webhookUser)
 			if userToken != "" {
 				log.Printf("Using OAuth token for user: %s", webhookUser)
 			}
 		}
 		// Fallback to Owner.Username if no token found from header
 		if userToken == "" {
-			userToken = d.tokenStore.GetTokenForRepo(strings.ToLower(payload.Repository.Owner.Username))
+			userToken = d.getTokenWithRefresh(payload.Repository.Owner.Username)
 			if userToken != "" {
 				log.Printf("Using OAuth token for owner: %s", payload.Repository.Owner.Username)
 			}

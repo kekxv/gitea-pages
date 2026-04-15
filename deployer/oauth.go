@@ -25,11 +25,12 @@ type OAuthConfig struct {
 
 // UserToken represents a user's OAuth2 token
 type UserToken struct {
-	Username    string    `json:"username"`
-	AccessToken string    `json:"access_token"`
-	TokenType   string    `json:"token_type"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	CreatedAt   time.Time `json:"created_at"`
+	Username     string    `json:"username"`
+	AccessToken  string    `json:"access_token"`
+	TokenType    string    `json:"token_type"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // OAuthHandler handles OAuth2 authentication
@@ -183,7 +184,8 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Redirect to OAuth provider
 	// SECURITY: Removed write:repository scope - we only need read access for cloning
 	// write:repository would allow pushing code, deleting branches, modifying repo settings
-	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20write:user%%20read:repository%%20write:organization",
+	// Added access_type=offline to get refresh_token for automatic token renewal
+	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20write:user%%20read:repository%%20write:organization&access_type=offline",
 		authURL,
 		h.config.ClientID,
 		redirectURL,
@@ -241,10 +243,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Store token
 	userToken := &UserToken{
-		Username:    userInfo["login"].(string),
-		AccessToken: token.AccessToken,
-		TokenType:   token.TokenType,
-		CreatedAt:   time.Now(),
+		Username:     userInfo["login"].(string),
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		RefreshToken: token.RefreshToken,
+		CreatedAt:    time.Now(),
 	}
 	// Set expiration if provided
 	if token.ExpiresIn > 0 {
@@ -292,9 +295,10 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 // OAuthTokenResponse represents the token response
 type OAuthTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 // exchangeCode exchanges authorization code for access token
@@ -380,6 +384,51 @@ func (h *OAuthHandler) getUserInfo(token string) (map[string]interface{}, error)
 	}
 
 	return userInfo, nil
+}
+
+// refreshAccessToken refreshes an expired access token using the refresh token
+// Returns the new token response or error
+func (h *OAuthHandler) refreshAccessToken(refreshToken string) (*OAuthTokenResponse, error) {
+	url := h.config.TokenURL
+
+	data := fmt.Sprintf("grant_type=refresh_token&client_id=%s&client_secret=%s&refresh_token=%s",
+		h.config.ClientID,
+		h.config.ClientSecret,
+		refreshToken,
+	)
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Token refresh request failed: %v", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Token refresh failed: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("token refresh failed: status %d", resp.StatusCode)
+	}
+
+	var token OAuthTokenResponse
+	if err := json.Unmarshal(bodyBytes, &token); err != nil {
+		return nil, err
+	}
+
+	log.Printf("Token refreshed successfully")
+	return &token, nil
 }
 
 func min(a, b int) int {

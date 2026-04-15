@@ -88,6 +88,7 @@ func (s *TokenStore) initDB() error {
 	CREATE TABLE IF NOT EXISTS user_tokens (
 		username TEXT PRIMARY KEY,
 		access_token TEXT NOT NULL,
+		refresh_token TEXT,
 		token_type TEXT,
 		expires_at DATETIME,
 		created_at DATETIME
@@ -98,6 +99,15 @@ func (s *TokenStore) initDB() error {
 	_, err = db.Exec(createTableSQL)
 	if err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
+	}
+
+	// Migration: Add refresh_token column if it doesn't exist
+	_, err = db.Exec(`ALTER TABLE user_tokens ADD COLUMN refresh_token TEXT`)
+	if err != nil {
+		// Column might already exist, ignore error
+		if !strings.Contains(err.Error(), "duplicate column") {
+			log.Printf("Warning: Failed to add refresh_token column (may already exist): %v", err)
+		}
 	}
 
 	return nil
@@ -113,7 +123,7 @@ func (s *TokenStore) loadFromDB() error {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT username, access_token, token_type, expires_at, created_at
+		SELECT username, access_token, refresh_token, token_type, expires_at, created_at
 		FROM user_tokens
 	`)
 	if err != nil {
@@ -125,10 +135,12 @@ func (s *TokenStore) loadFromDB() error {
 	for rows.Next() {
 		var token UserToken
 		var expiresAt, createdAt sql.NullTime
+		var refreshToken sql.NullString
 
 		err := rows.Scan(
 			&token.Username,
 			&token.AccessToken,
+			&refreshToken,
 			&token.TokenType,
 			&expiresAt,
 			&createdAt,
@@ -138,6 +150,9 @@ func (s *TokenStore) loadFromDB() error {
 			continue
 		}
 
+		if refreshToken.Valid {
+			token.RefreshToken = refreshToken.String
+		}
 		if expiresAt.Valid {
 			token.ExpiresAt = expiresAt.Time
 		}
@@ -171,11 +186,12 @@ func (s *TokenStore) Set(username string, token *UserToken) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err := s.db.ExecContext(ctx, `
 			INSERT OR REPLACE INTO user_tokens
-			(username, access_token, token_type, expires_at, created_at)
-			VALUES (?, ?, ?, ?, ?)
+			(username, access_token, refresh_token, token_type, expires_at, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)
 		`,
 			normalizedUsername,
 			token.AccessToken,
+			token.RefreshToken,
 			token.TokenType,
 			token.ExpiresAt,
 			token.CreatedAt,
