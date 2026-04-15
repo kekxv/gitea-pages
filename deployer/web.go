@@ -12,23 +12,25 @@ type WebHandler struct {
 	oauthConfig *OAuthConfig
 	tokenStore  *TokenStore
 	domain      string
+	secret      string // For session validation
 }
 
 // NewWebHandler creates a new web handler
-func NewWebHandler(oauthConfig *OAuthConfig, tokenStore *TokenStore, domain string) *WebHandler {
+func NewWebHandler(oauthConfig *OAuthConfig, tokenStore *TokenStore, domain, secret string) *WebHandler {
 	return &WebHandler{
 		oauthConfig: oauthConfig,
 		tokenStore:  tokenStore,
 		domain:      domain,
+		secret:      secret,
 	}
 }
 
-// maskUsername masks username for privacy (shows first 2 chars and masks the rest)
+// maskUsername masks username for privacy (shows first char only)
 func maskUsername(username string) string {
-	if len(username) <= 2 {
+	if len(username) <= 1 {
 		return username[:1] + "***"
 	}
-	return username[:2] + strings.Repeat("*", len(username)-2)
+	return username[:1] + strings.Repeat("*", len(username)-1)
 }
 
 // HandleIndex renders the home page
@@ -53,28 +55,103 @@ func (h *WebHandler) HandleIndex(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, data)
 }
 
-// HandleStatus shows authorization status
+// HandleStatus shows authorization status for the authenticated user only
 func (h *WebHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	type UserInfo struct {
-		Username      string
-		MaskedName    string
-		Initial       string
-		RegResult     *WebhookRegistrationResult
+	// Validate session to get authenticated username
+	sessionCookie, err := r.Cookie(sessionCookieName)
+	authUsername := ""
+	if err == nil && sessionCookie != nil {
+		authUsername = ValidateSession(sessionCookie, h.secret)
 	}
 
-	users := []UserInfo{}
+	// If no valid session, show login prompt
+	if authUsername == "" {
+		h.showStatusLoginPrompt(w, r)
+		return
+	}
+
+	// Show status for authenticated user only
+	h.showUserStatus(w, authUsername)
+}
+
+// showStatusLoginPrompt shows a page prompting user to authorize
+func (h *WebHandler) showStatusLoginPrompt(w http.ResponseWriter, r *http.Request) {
+	hasOAuth := h.oauthConfig != nil && h.oauthConfig.ClientID != ""
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Gitea Pages - Status</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f9fafb; min-height: 100vh; }
+        .container { background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #3b82f6 0%%, #1d4ed8 100%%); color: white; padding: 40px; text-align: center; }
+        .header h1 { margin: 0 0 8px 0; font-size: 28px; }
+        .content { padding: 40px; text-align: center; }
+        .icon { font-size: 64px; margin-bottom: 20px; }
+        .message { color: #6b7280; margin: 20px 0; }
+        .btn { display: inline-block; background: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500; margin: 10px; }
+        .btn:hover { background: #2563eb; }
+        .btn-secondary { background: #6b7280; }
+        .btn-secondary:hover { background: #4b5563; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Gitea Pages Status</h1>
+        </div>
+        <div class="content">
+            <div class="icon">🔐</div>
+            <p class="message">请先授权以查看您的部署状态</p>
+            %s
+            <p><a href="/" class="btn btn-secondary">返回首页</a></p>
+        </div>
+    </div>
+</body>
+</html>
+`, func() string {
+		if hasOAuth {
+			return `<p><a href="/oauth/start" class="btn">授权 Gitea Pages</a></p>`
+		}
+		return `<p style="color: #dc2626;">OAuth 未配置，请联系管理员</p>`
+	}())
+}
+
+// showUserStatus shows status for a specific authenticated user
+func (h *WebHandler) showUserStatus(w http.ResponseWriter, username string) {
+	type UserInfo struct {
+		Username   string
+		MaskedName string
+		RegResult  *WebhookRegistrationResult
+	}
+
+	user := UserInfo{
+		Username:   username,
+		MaskedName: maskUsername(username),
+		RegResult:  nil,
+	}
 
 	if h.tokenStore != nil {
-		h.tokenStore.mu.RLock()
-		for username := range h.tokenStore.tokens {
-			users = append(users, UserInfo{
-				Username:   username,
-				MaskedName: maskUsername(username),
-				Initial:    string([]rune(username)[0]),
-				RegResult:  h.tokenStore.GetRegistrationResult(username),
-			})
-		}
-		h.tokenStore.mu.RUnlock()
+		user.RegResult = h.tokenStore.GetRegistrationResult(username)
+	}
+
+	// Determine status class and text
+	var statusClass, statusText string
+	if user.RegResult == nil {
+		statusClass = "status-pending"
+		statusText = "⏳ 正在注册 Webhook..."
+	} else if user.RegResult.Success {
+		statusClass = "status-success"
+		statusText = "✓ " + user.RegResult.Message
+	} else if user.RegResult.HasScopeError {
+		statusClass = "status-error"
+		statusText = "✗ " + user.RegResult.Message
+	} else {
+		statusClass = "status-warning"
+		statusText = "⚠ " + user.RegResult.Message
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -84,154 +161,67 @@ func (h *WebHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
     <title>Gitea Pages - Status</title>
     <style>
         * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f9fafb; min-height: 100vh; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f9fafb; min-height: 100vh; }
         .container { background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
         .header { background: linear-gradient(135deg, #3b82f6 0%%, #1d4ed8 100%%); color: white; padding: 40px; text-align: center; }
         .header h1 { margin: 0 0 8px 0; font-size: 28px; }
-        .header p { margin: 0; opacity: 0.9; }
         .content { padding: 40px; }
-        .card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 20px 0; }
-        .card h2 { color: #1f2937; margin: 0 0 16px 0; font-size: 18px; display: flex; align-items: center; gap: 8px; }
-        .card h2 .icon { font-size: 24px; }
-        .stats { display: flex; gap: 20px; margin-bottom: 20px; }
-        .stat { flex: 1; background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; text-align: center; }
-        .stat-number { font-size: 36px; font-weight: bold; color: #3b82f6; }
-        .stat-label { color: #6b7280; font-size: 14px; margin-top: 4px; }
-        .user-list { display: flex; flex-direction: column; gap: 12px; }
-        .user { display: flex; align-items: center; gap: 12px; background: white; border: 1px solid #e5e7eb; padding: 16px; border-radius: 8px; }
-        .user-avatar { width: 40px; height: 40px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 50%%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 16px; flex-shrink: 0; }
-        .user-info { flex: 1; }
-        .user-name { font-weight: 600; color: #1f2937; font-size: 16px; }
-        .user-status { font-size: 13px; margin-top: 4px; }
+        .user-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 20px 0; text-align: center; }
+        .user-avatar { width: 64px; height: 64px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 50%%; display: flex; align-items: center; justify-content: center; color: white; font-size: 32px; margin: 0 auto 16px; }
+        .user-name { font-weight: 600; color: #1f2937; font-size: 20px; }
+        .user-status { font-size: 14px; margin-top: 8px; }
         .status-success { color: #16a34a; }
         .status-warning { color: #d97706; }
         .status-error { color: #dc2626; }
         .status-pending { color: #6b7280; }
-        .empty-state { text-align: center; padding: 40px 20px; color: #6b7280; }
-        .empty-icon { font-size: 48px; margin-bottom: 16px; }
-        .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 20px 0; }
-        .info-item { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; }
-        .info-item h3 { color: #1f2937; margin: 0 0 12px 0; font-size: 16px; }
-        .info-item code { display: block; background: #f3f4f6; padding: 12px; border-radius: 6px; font-size: 13px; color: #4b5563; word-break: break-all; }
-        .info-item ul { margin: 0; padding-left: 20px; }
-        .info-item li { color: #4b5563; margin: 8px 0; font-size: 14px; }
-        .btn { display: inline-block; background: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500; margin-top: 20px; }
+        .info-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 20px 0; }
+        .info-card h2 { color: #1f2937; margin: 0 0 16px 0; font-size: 18px; }
+        .info-card ul { margin: 0; padding-left: 20px; }
+        .info-card li { color: #4b5563; margin: 8px 0; font-size: 14px; }
+        .info-card code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
+        .btn { display: inline-block; background: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500; margin: 10px; }
         .btn:hover { background: #2563eb; }
-        .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
-        .footer a { color: #3b82f6; }
+        .btn-secondary { background: #6b7280; }
+        .btn-secondary:hover { background: #4b5563; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 Gitea Pages Status</h1>
-            <p>系统运行状态与授权管理</p>
+            <h1>📊 您的授权状态</h1>
         </div>
-
         <div class="content">
-            <div class="stats">
-                <div class="stat">
-                    <div class="stat-number">%d</div>
-                    <div class="stat-label">已授权用户</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-number">%s</div>
-                    <div class="stat-label">服务域名</div>
-                </div>
+            <div class="user-card">
+                <div class="user-avatar">👤</div>
+                <div class="user-name">%s</div>
+                <div class="user-status %s">%s</div>
             </div>
 
-            <div class="card">
-                <h2><span class="icon">👥</span> 已授权用户</h2>
-`, len(users), h.domain)
-
-	if len(users) > 0 {
-		w.Write([]byte(`<div class="user-list">`))
-		for _, user := range users {
-			// Determine status class and text based on registration result
-			var statusClass, statusText string
-			if user.RegResult == nil {
-				statusClass = "status-pending"
-				statusText = "⏳ 正在注册 Webhook..."
-			} else if user.RegResult.Success {
-				statusClass = "status-success"
-				statusText = "✓ " + user.RegResult.Message
-			} else if user.RegResult.HasScopeError {
-				statusClass = "status-error"
-				statusText = "✗ " + user.RegResult.Message
-			} else {
-				statusClass = "status-warning"
-				statusText = "⚠ " + user.RegResult.Message
-			}
-			fmt.Fprintf(w, `
-                <div class="user">
-                    <div class="user-avatar">%s</div>
-                    <div class="user-info">
-                        <span class="user-name">%s</span>
-                        <span class="user-status %s">%s</span>
-                    </div>
-                </div>`, user.Initial, user.MaskedName, statusClass, statusText)
-		}
-		w.Write([]byte(`</div>`))
-	} else {
-		fmt.Fprintf(w, `
-                <div class="empty-state">
-                    <div class="empty-icon">🔐</div>
-                    <p>暂无已授权用户</p>
-                    <p style="font-size: 14px;">点击下方按钮进行授权</p>
-                </div>`)
-	}
-
-	fmt.Fprintf(w, `
+            <div class="info-card">
+                <h2>🌐 站点地址</h2>
+                <ul>
+                    <li>根目录站点: <code>%s.%s</code></li>
+                    <li>子目录站点: <code>%s.%s/repo</code></li>
+                </ul>
             </div>
 
-            <div class="card">
-                <h2><span class="icon">📖</span> 使用指南</h2>
-                <div class="info-grid">
-                    <div class="info-item">
-                        <h3>🚀 部署步骤</h3>
-                        <ul>
-                            <li>创建仓库并添加 <code>gh-pages</code> 分支</li>
-                            <li>推送代码，自动部署完成</li>
-                            <li>删除分支，站点自动移除</li>
-                        </ul>
-                    </div>
-                    <div class="info-item">
-                        <h3>🌐 站点地址</h3>
-                        <ul>
-                            <li>根目录: <code>username.%s</code></li>
-                            <li>子目录: <code>username.%s/repo</code></li>
-                        </ul>
-                    </div>
-                    <div class="info-item">
-                        <h3>📁 仓库命名</h3>
-                        <ul>
-                            <li>根站点: <code>username.%s</code></li>
-                            <li>子站点: 任意名称</li>
-                        </ul>
-                    </div>
-                    <div class="info-item">
-                        <h3>🔒 权限说明</h3>
-                        <ul>
-                            <li>读取用户信息 - 标识站点所有者</li>
-                            <li>读取仓库 - 克隆代码部署</li>
-                            <li>管理用户 Webhook - 个人仓库推送即部署</li>
-                            <li>管理组织 Webhook - 组织仓库推送即部署</li>
-                        </ul>
-                    </div>
-                </div>
+            <div class="info-card">
+                <h2>🚀 部署步骤</h2>
+                <ul>
+                    <li>创建仓库并添加 <code>gh-pages</code> 分支</li>
+                    <li>推送代码，自动部署完成</li>
+                    <li>删除分支，站点自动移除</li>
+                </ul>
             </div>
 
             <div style="text-align: center;">
                 <a href="/" class="btn">← 返回首页</a>
             </div>
         </div>
-
-        <div class="footer">
-            <p>Gitea Pages · 零配置静态网站托管 · <a href="/">首页</a></p>
-        </div>
     </div>
 </body>
-</html>`, h.domain, h.domain, h.domain)
+</html>
+`, user.MaskedName, statusClass, statusText, user.Username, h.domain, user.Username, h.domain)
 }
 
 // GetUserToken returns a user's token for use in deployments

@@ -160,6 +160,12 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+	} else {
+		// SECURITY: Reject webhooks without signature verification
+		// This prevents forged webhook attacks
+		log.Printf("SECURITY WARNING: Webhook rejected - no WEBHOOK_SECRET configured")
+		http.Error(w, "Webhook secret not configured", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Get event type from header
@@ -184,9 +190,17 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		payload.Repository.Name, payload.Ref, payload.Pusher.Login)
 
 	// Security: Validate clone URL to prevent token phishing
+	// SECURITY: Clone URL must be from trusted host
 	if !IsTrustedCloneURL(payload.Repository.CloneURL, d.config.GiteaAPIURL) {
-		log.Printf("Rejected untrusted clone URL: %s", payload.Repository.CloneURL)
+		log.Printf("Rejected untrusted clone URL: %s", SanitizeGitOutput(payload.Repository.CloneURL))
 		http.Error(w, "Untrusted clone URL", http.StatusForbidden)
+		return
+	}
+
+	// SECURITY: For private repos, require trusted API URL for clone URL verification
+	if payload.Repository.Private && d.config.GiteaAPIURL == "" {
+		log.Printf("Rejected private repo webhook - no GITEA_API_URL configured for clone URL verification")
+		http.Error(w, "Private repo requires API URL configuration", http.StatusForbidden)
 		return
 	}
 

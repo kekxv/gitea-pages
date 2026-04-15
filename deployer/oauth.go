@@ -1,13 +1,17 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -198,6 +202,9 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // HandleCallback handles the OAuth2 callback
 func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
+	// Determine if connection is secure
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+
 	// Verify state
 	stateCookie, err := r.Cookie("oauth_state")
 	if err != nil {
@@ -258,7 +265,14 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// Register webhooks asynchronously to avoid timeout for users with many organizations
 	go h.registerWebhooks(userToken)
 
+	// Set session cookie for /status page authentication
+	// Session contains signed username to prevent forgery
+	sessionCookie := h.createSessionCookie(userToken.Username, isSecure)
+	http.SetCookie(w, sessionCookie)
+
 	// Show success page immediately
+	// SECURITY: Mask username to prevent information leakage
+	maskedUsername := maskUsername(userToken.Username)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -290,7 +304,7 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
     <p><a href="/">返回首页</a> | <a href="/status">查看状态</a></p>
 </body>
 </html>
-`, userToken.Username)
+`, maskedUsername)
 }
 
 // OAuthTokenResponse represents the token response
@@ -429,6 +443,90 @@ func (h *OAuthHandler) refreshAccessToken(refreshToken string) (*OAuthTokenRespo
 
 	log.Printf("Token refreshed successfully")
 	return &token, nil
+}
+
+// RefreshAllTokens refreshes all stored tokens proactively
+// This is called periodically to prevent tokens from expiring
+func (h *OAuthHandler) RefreshAllTokens() {
+	if h.store == nil {
+		return
+	}
+
+	users := h.store.List()
+	for _, username := range users {
+		token := h.store.Get(username)
+		if token == nil {
+			continue
+		}
+
+		// Skip if no refresh token available
+		if token.RefreshToken == "" {
+			log.Printf("No refresh token for %s, user needs to re-authorize", username)
+			continue
+		}
+
+		// Check if token needs refresh (expires within 7 days or already expired)
+		shouldRefresh := false
+		if token.ExpiresAt.IsZero() {
+			// No expiration set, refresh anyway to be safe
+			shouldRefresh = true
+		} else if time.Now().Add(7 * 24 * time.Hour).After(token.ExpiresAt) {
+			// Expires within 7 days, refresh now
+			shouldRefresh = true
+		}
+
+		if !shouldRefresh {
+			continue
+		}
+
+		log.Printf("Proactively refreshing token for %s (expires at %s)", username, token.ExpiresAt.Format("2006-01-02 15:04:05"))
+
+		newToken, err := h.refreshAccessToken(token.RefreshToken)
+		if err != nil {
+			log.Printf("Failed to refresh token for %s: %v", username, err)
+			// Token refresh failed, user needs to re-authorize
+			continue
+		}
+
+		// Update token in store
+		token.AccessToken = newToken.AccessToken
+		token.TokenType = newToken.TokenType
+		if newToken.RefreshToken != "" {
+			token.RefreshToken = newToken.RefreshToken
+		}
+		if newToken.ExpiresIn > 0 {
+			token.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+		}
+		token.CreatedAt = time.Now()
+		h.store.Set(username, token)
+
+		log.Printf("Token refreshed successfully for %s", username)
+	}
+}
+
+// StartBackgroundRefresh starts a background goroutine that periodically refreshes tokens
+// interval is the time between refresh checks (in hours)
+func (h *OAuthHandler) StartBackgroundRefresh(intervalHours int) {
+	if h.store == nil {
+		return
+	}
+
+	// Refresh immediately on startup
+	log.Printf("Starting initial token refresh check...")
+	h.RefreshAllTokens()
+
+	// Start background refresh loop
+	go func() {
+		ticker := time.NewTicker(time.Duration(intervalHours) * time.Hour)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			log.Printf("Running scheduled token refresh check...")
+			h.RefreshAllTokens()
+		}
+	}()
+
+	log.Printf("Background token refresh started (interval: %d hours)", intervalHours)
 }
 
 func min(a, b int) int {
@@ -898,4 +996,88 @@ func (h *OAuthHandler) registerUserWebhook(token, username string) error {
 	}
 
 	return nil
+}
+// Session cookie constants
+const (
+	sessionCookieName = "gitea_pages_session"
+	sessionDuration   = 24 * time.Hour // 24 hours
+)
+
+// createSessionCookie creates a signed session cookie containing the username
+// The cookie value is: username:timestamp:HMAC signature
+func (h *OAuthHandler) createSessionCookie(username string, secure bool) *http.Cookie {
+	// Create session value: username:timestamp
+	sessionData := fmt.Sprintf("%s:%d", username, time.Now().Unix())
+
+	// Sign the session data with HMAC
+	signature := h.signSession(sessionData)
+
+	// Combine data and signature
+	cookieValue := fmt.Sprintf("%s:%s", sessionData, signature)
+
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    cookieValue,
+		Path:     "/",
+		MaxAge:   int(sessionDuration.Seconds()),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// signSession creates an HMAC signature for session data
+func (h *OAuthHandler) signSession(data string) string {
+	if h.secret == "" {
+		// No secret configured, use a fallback (not ideal but prevents crash)
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(h.secret))
+	mac.Write([]byte(data))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ValidateSession validates a session cookie and returns the username
+// Returns empty string if invalid
+func ValidateSession(cookie *http.Cookie, secret string) string {
+	if cookie == nil || cookie.Value == "" || secret == "" {
+		return ""
+	}
+
+	// Parse cookie value: username:timestamp:signature
+	parts := strings.Split(cookie.Value, ":")
+	if len(parts) != 3 {
+		return ""
+	}
+
+	username := parts[0]
+	timestampStr := parts[1]
+	signature := parts[2]
+
+	// Verify signature
+	expectedSig := signSessionWithSecret(fmt.Sprintf("%s:%s", username, timestampStr), secret)
+	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
+		return ""
+	}
+
+	// Check timestamp (prevent expired sessions)
+	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
+	if err != nil {
+		return ""
+	}
+	if time.Now().Unix()-timestamp > int64(sessionDuration.Seconds()) {
+		return ""
+	}
+
+	return username
+}
+
+// signSessionWithSecret signs session data with a specific secret
+func signSessionWithSecret(data, secret string) string {
+	if secret == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(data))
+	return hex.EncodeToString(mac.Sum(nil))
 }

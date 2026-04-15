@@ -81,7 +81,8 @@ func main() {
 	}
 
 	if config.WebhookSecret == "" {
-		log.Println("WARNING: WEBHOOK_SECRET not set, signature verification disabled")
+		log.Println("SECURITY ERROR: WEBHOOK_SECRET not set - webhook processing is DISABLED")
+		log.Println("Set WEBHOOK_SECRET environment variable to enable webhook processing")
 	}
 
 	// Initialize deployer
@@ -94,7 +95,7 @@ func main() {
 	deployer.SetTokenStore(tokenStore)
 
 	// Initialize web handler
-	webHandler := NewWebHandler(nil, tokenStore, config.Domain)
+	webHandler := NewWebHandler(nil, tokenStore, config.Domain, config.WebhookSecret)
 
 	// Initialize OAuth handler if configured
 	var oauthHandler *OAuthHandler
@@ -135,6 +136,10 @@ func main() {
 		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, config.WebhookSecret)
 		webHandler.oauthConfig = oauthConfig
 		deployer.SetOAuthHandler(oauthHandler)
+
+		// Start background token refresh (every 24 hours)
+		// This proactively refreshes tokens before they expire
+		oauthHandler.StartBackgroundRefresh(24)
 	}
 
 	// Setup routes
