@@ -5,7 +5,7 @@ import "testing"
 func TestTokenStorePersistsTokens(t *testing.T) {
 	dataDir := t.TempDir()
 
-	store := NewTokenStore(dataDir)
+	store := newTestTokenStoreAt(t, dataDir)
 	if store.db == nil {
 		t.Fatal("token store did not initialize its SQLite database")
 	}
@@ -14,7 +14,7 @@ func TestTokenStorePersistsTokens(t *testing.T) {
 		t.Fatalf("close initial store: %v", err)
 	}
 
-	reloaded := NewTokenStore(dataDir)
+	reloaded := newTestTokenStoreAt(t, dataDir)
 	t.Cleanup(func() { _ = reloaded.Close() })
 	if reloaded.db == nil {
 		t.Fatal("reloaded token store did not initialize its SQLite database")

@@ -19,6 +19,7 @@ type TokenStore struct {
 	mu                  sync.RWMutex
 	tokens              map[string]*UserToken
 	registrationResults map[string]*WebhookRegistrationResult // In-memory only, updated async
+	cipher              *TokenCipher
 	db                  *sql.DB
 	dbPath              string
 	cleanupStop         chan struct{}
@@ -27,11 +28,16 @@ type TokenStore struct {
 	closeErr            error
 }
 
-// NewTokenStore creates a new token store with SQLite persistence
-func NewTokenStore(dataDir string) *TokenStore {
+// NewTokenStore creates a new encrypted token store with SQLite persistence.
+func NewTokenStore(dataDir string, key []byte) (*TokenStore, error) {
+	cipher, err := NewTokenCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
 	// Ensure data directory exists
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		log.Printf("Warning: Failed to create data directory: %v", err)
+		return nil, fmt.Errorf("create token data directory: %w", err)
 	}
 
 	dbPath := filepath.Join(dataDir, "tokens.db")
@@ -39,27 +45,26 @@ func NewTokenStore(dataDir string) *TokenStore {
 	store := &TokenStore{
 		tokens:              make(map[string]*UserToken),
 		registrationResults: make(map[string]*WebhookRegistrationResult),
+		cipher:              cipher,
 		dbPath:              dbPath,
 	}
 
-	// Initialize database
 	if err := store.initDB(); err != nil {
-		log.Printf("Warning: Failed to initialize database, using memory-only mode: %v", err)
-		return store
+		return nil, err
 	}
 
-	// Load existing tokens from database
 	if err := store.loadFromDB(); err != nil {
-		log.Printf("Warning: Failed to load tokens from database: %v", err)
+		_ = store.Close()
+		return nil, err
 	}
 	store.startDeliveryCleanup()
 
 	log.Printf("Token store initialized with SQLite persistence: %s", dbPath)
-	return store
+	return store, nil
 }
 
 // initDB initializes the SQLite database
-func (s *TokenStore) initDB() error {
+func (s *TokenStore) initDB() (err error) {
 	// Configure the pure-Go SQLite driver to wait briefly for locks and use WAL.
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", s.dbPath)
 
@@ -67,6 +72,11 @@ func (s *TokenStore) initDB() error {
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			_ = db.Close()
+		}
+	}()
 
 	// Set connection pool settings for SQLite
 	db.SetMaxOpenConns(1) // SQLite works best with single connection
@@ -80,24 +90,28 @@ func (s *TokenStore) initDB() error {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	s.db = db
-
 	// Restrict database file permissions
 	if err := os.Chmod(s.dbPath, 0600); err != nil {
 		log.Printf("Warning: Failed to set database permissions: %v", err)
 	}
 
-	// Create tables if they do not exist.
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("begin token schema migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Create the encrypted token schema and preserve existing hook data.
 	createTableSQL := `
-	CREATE TABLE IF NOT EXISTS user_tokens (
+	CREATE TABLE IF NOT EXISTS user_tokens_v2 (
 		username TEXT PRIMARY KEY,
-		access_token TEXT NOT NULL,
-		refresh_token TEXT,
+		access_token_ciphertext BLOB NOT NULL,
+		refresh_token_ciphertext BLOB,
 		token_type TEXT,
 		expires_at DATETIME,
-		created_at DATETIME
+		created_at DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_username ON user_tokens(username);
+	CREATE INDEX IF NOT EXISTS idx_user_tokens_v2_username ON user_tokens_v2(username);
 	CREATE TABLE IF NOT EXISTS hook_credentials (
 		hook_key TEXT PRIMARY KEY,
 		secret BLOB NOT NULL,
@@ -116,23 +130,33 @@ func (s *TokenStore) initDB() error {
 	CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received_at ON webhook_deliveries(received_at);
 	`
 
-	_, err = db.Exec(createTableSQL)
+	_, err = tx.Exec(createTableSQL)
 	if err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
+
+	var hasLegacyTable int
+	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_tokens')`).Scan(&hasLegacyTable)
+	if err != nil {
+		return fmt.Errorf("inspect legacy token schema: %w", err)
+	}
+	if hasLegacyTable == 1 {
+		var hasPlaintextRows int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM user_tokens LIMIT 1)`).Scan(&hasPlaintextRows); err != nil {
+			return fmt.Errorf("inspect legacy tokens: %w", err)
+		}
+		if hasPlaintextRows == 1 {
+			return fmt.Errorf("plaintext user_tokens rows detected; run the Task 10 token migration command before starting the server")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit token schema migration: %w", err)
+	}
+
+	s.db = db
 	if err := s.cleanupExpiredDeliveries(context.Background()); err != nil {
 		return fmt.Errorf("failed to clean expired webhook deliveries: %w", err)
 	}
-
-	// Migration: Add refresh_token column if it doesn't exist
-	_, err = db.Exec(`ALTER TABLE user_tokens ADD COLUMN refresh_token TEXT`)
-	if err != nil {
-		// Column might already exist, ignore error
-		if !strings.Contains(err.Error(), "duplicate column") {
-			log.Printf("Warning: Failed to add refresh_token column (may already exist): %v", err)
-		}
-	}
-
 	return nil
 }
 
@@ -184,8 +208,8 @@ func (s *TokenStore) loadFromDB() error {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT username, access_token, refresh_token, token_type, expires_at, created_at
-		FROM user_tokens
+		SELECT username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at
+		FROM user_tokens_v2
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to query tokens: %w", err)
@@ -196,23 +220,32 @@ func (s *TokenStore) loadFromDB() error {
 	for rows.Next() {
 		var token UserToken
 		var expiresAt, createdAt sql.NullTime
-		var refreshToken sql.NullString
+		var accessTokenCiphertext []byte
+		var refreshTokenCiphertext []byte
 
 		err := rows.Scan(
 			&token.Username,
-			&token.AccessToken,
-			&refreshToken,
+			&accessTokenCiphertext,
+			&refreshTokenCiphertext,
 			&token.TokenType,
 			&expiresAt,
 			&createdAt,
 		)
 		if err != nil {
-			log.Printf("Warning: Failed to scan token row: %v", err)
-			continue
+			return fmt.Errorf("scan token row: %w", err)
 		}
 
-		if refreshToken.Valid {
-			token.RefreshToken = refreshToken.String
+		accessToken, err := s.cipher.Open(accessTokenCiphertext)
+		if err != nil {
+			return ErrTokenDecrypt
+		}
+		token.AccessToken = string(accessToken)
+		if refreshTokenCiphertext != nil {
+			refreshToken, err := s.cipher.Open(refreshTokenCiphertext)
+			if err != nil {
+				return ErrTokenDecrypt
+			}
+			token.RefreshToken = string(refreshToken)
 		}
 		if expiresAt.Valid {
 			token.ExpiresAt = expiresAt.Time
@@ -221,49 +254,97 @@ func (s *TokenStore) loadFromDB() error {
 			token.CreatedAt = createdAt.Time
 		}
 
-		s.tokens[token.Username] = &token
+		tokenCopy := token
+		s.tokens[token.Username] = &tokenCopy
 		count++
 	}
 
 	log.Printf("Loaded %d tokens from database", count)
-	return nil
+	return rows.Err()
 }
 
 // Set stores a user token (in memory and database)
 // Username is normalized to lowercase for consistent lookup
 func (s *TokenStore) Set(username string, token *UserToken) {
+	if token == nil {
+		return
+	}
 	// Normalize username to lowercase
 	normalizedUsername := strings.ToLower(username)
-	token.Username = normalizedUsername
+	tokenCopy := *token
+	tokenCopy.Username = normalizedUsername
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Update memory
-	s.tokens[normalizedUsername] = token
+	if err := s.writeToken(&tokenCopy); err != nil {
+		log.Printf("Warning: Failed to save token for user %s: %v", normalizedUsername, err)
+		return
+	}
+	s.tokens[normalizedUsername] = &tokenCopy
+	log.Printf("Token saved to database for user: %s", normalizedUsername)
+}
 
-	// Update database
-	if s.db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := s.db.ExecContext(ctx, `
-			INSERT OR REPLACE INTO user_tokens
-			(username, access_token, refresh_token, token_type, expires_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`,
-			normalizedUsername,
-			token.AccessToken,
-			token.RefreshToken,
-			token.TokenType,
-			token.ExpiresAt,
-			token.CreatedAt,
-		)
-		cancel()
+// UpdateToken atomically replaces one token after applying update to a value copy.
+func (s *TokenStore) UpdateToken(username string, update func(UserToken) UserToken) error {
+	normalizedUsername := strings.ToLower(username)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.tokens[normalizedUsername]
+	if current == nil {
+		return fmt.Errorf("token not found for user %s", normalizedUsername)
+	}
+	updated := update(*current)
+	updated.Username = normalizedUsername
+	if err := s.writeToken(&updated); err != nil {
+		return err
+	}
+	s.tokens[normalizedUsername] = &updated
+	return nil
+}
+
+func (s *TokenStore) writeToken(token *UserToken) error {
+	if s.db == nil || s.cipher == nil {
+		return fmt.Errorf("token storage is unavailable")
+	}
+	accessTokenCiphertext, err := s.cipher.Seal([]byte(token.AccessToken))
+	if err != nil {
+		return fmt.Errorf("encrypt access token: %w", err)
+	}
+	var refreshTokenCiphertext []byte
+	if token.RefreshToken != "" {
+		refreshTokenCiphertext, err = s.cipher.Seal([]byte(token.RefreshToken))
 		if err != nil {
-			log.Printf("Warning: Failed to save token to database: %v", err)
-		} else {
-			log.Printf("Token saved to database for user: %s", normalizedUsername)
+			return fmt.Errorf("encrypt refresh token: %w", err)
 		}
 	}
+	if token.CreatedAt.IsZero() {
+		token.CreatedAt = time.Now().UTC()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO user_tokens_v2
+			(username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET
+			access_token_ciphertext = excluded.access_token_ciphertext,
+			refresh_token_ciphertext = excluded.refresh_token_ciphertext,
+			token_type = excluded.token_type,
+			expires_at = excluded.expires_at,
+			created_at = excluded.created_at
+	`, token.Username, accessTokenCiphertext, refreshTokenCiphertext, token.TokenType, token.ExpiresAt, token.CreatedAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Get retrieves a user token (username normalized to lowercase)
@@ -271,7 +352,12 @@ func (s *TokenStore) Get(username string) *UserToken {
 	normalizedUsername := strings.ToLower(username)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.tokens[normalizedUsername]
+	token := s.tokens[normalizedUsername]
+	if token == nil {
+		return nil
+	}
+	copy := *token
+	return &copy
 }
 
 // GetTokenForRepo returns the access token for a repository owner
@@ -302,7 +388,7 @@ func (s *TokenStore) Delete(username string) {
 
 	if s.db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := s.db.ExecContext(ctx, "DELETE FROM user_tokens WHERE username = ?", normalizedUsername)
+		_, err := s.db.ExecContext(ctx, "DELETE FROM user_tokens_v2 WHERE username = ?", normalizedUsername)
 		cancel()
 		if err != nil {
 			log.Printf("Warning: Failed to delete token from database: %v", err)

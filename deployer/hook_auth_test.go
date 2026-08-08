@@ -131,7 +131,7 @@ func TestAuthenticateWebhookRejectsBodiesOverOneMiB(t *testing.T) {
 
 func TestHookStorePersistsCredentialsAndRejectsDuplicateDeliveries(t *testing.T) {
 	dataDir := t.TempDir()
-	store := NewTokenStore(dataDir)
+	store := newTestTokenStoreAt(t, dataDir)
 	if store.db == nil {
 		t.Fatal("token store did not initialize its SQLite database")
 	}
@@ -143,7 +143,7 @@ func TestHookStorePersistsCredentialsAndRejectsDuplicateDeliveries(t *testing.T)
 		t.Fatalf("close initial store: %v", err)
 	}
 
-	reloaded := NewTokenStore(dataDir)
+	reloaded := newTestTokenStoreAt(t, dataDir)
 	t.Cleanup(func() { _ = reloaded.Close() })
 	stored, err := reloaded.GetHook(context.Background(), credential.Key)
 	if err != nil {
@@ -165,7 +165,7 @@ func TestHookStorePersistsCredentialsAndRejectsDuplicateDeliveries(t *testing.T)
 
 func TestHookStoreCleansDeliveriesOlderThanSevenDaysAtStartup(t *testing.T) {
 	dataDir := t.TempDir()
-	store := NewTokenStore(dataDir)
+	store := newTestTokenStoreAt(t, dataDir)
 	if store.db == nil {
 		t.Fatal("token store did not initialize its SQLite database")
 	}
@@ -176,7 +176,7 @@ func TestHookStoreCleansDeliveriesOlderThanSevenDaysAtStartup(t *testing.T) {
 		t.Fatalf("close initial store: %v", err)
 	}
 
-	reloaded := NewTokenStore(dataDir)
+	reloaded := newTestTokenStoreAt(t, dataDir)
 	t.Cleanup(func() { _ = reloaded.Close() })
 	var count int
 	if err := reloaded.db.QueryRow(`SELECT COUNT(*) FROM webhook_deliveries WHERE delivery_id = 'old'`).Scan(&count); err != nil {
@@ -189,7 +189,7 @@ func TestHookStoreCleansDeliveriesOlderThanSevenDaysAtStartup(t *testing.T) {
 
 func newMemoryHookStore(t *testing.T) *TokenStore {
 	t.Helper()
-	store := NewTokenStore(t.TempDir())
+	store := newTestTokenStore(t)
 	if store.db == nil {
 		t.Fatal("token store did not initialize its SQLite database")
 	}

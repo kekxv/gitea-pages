@@ -43,6 +43,23 @@ func TestLoadConfigRejectsMissingSessionSecretWithValidGitea(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsMissingTokenEncryptionKey(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
+	t.Setenv("SESSION_SECRET_FILE", "")
+	t.Setenv("SESSION_SECRET", strings.Repeat("s", 32))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("OAUTH_CLIENT_ID", "")
+	t.Setenv("OAUTH_CLIENT_SECRET_FILE", "")
+	t.Setenv("OAUTH_CLIENT_SECRET", "")
+	t.Setenv("LEGACY_WEBHOOK_SECRET_FILE", "")
+	t.Setenv("WEBHOOK_SECRET", "")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must reject a valid configuration with no token encryption key")
+	}
+}
+
 func TestLoadConfigPrefersLegacyWebhookSecretFile(t *testing.T) {
 	dir := t.TempDir()
 	sessionSecret := writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)+"\n")
@@ -116,10 +133,12 @@ func TestLoadConfigEnablesOrganizationHooksByDefault(t *testing.T) {
 }
 
 func TestLoadConfigUsesLegacySessionAndOAuthSecretsWhenFilesAreAbsent(t *testing.T) {
+	dir := t.TempDir()
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
 	t.Setenv("SESSION_SECRET_FILE", "")
 	t.Setenv("SESSION_SECRET", strings.Repeat("p", 32))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
 	t.Setenv("OAUTH_CLIENT_ID", "client-id")
 	t.Setenv("OAUTH_CLIENT_SECRET_FILE", "")
 	t.Setenv("OAUTH_CLIENT_SECRET", "legacy-oauth-secret")
@@ -142,10 +161,12 @@ func TestLoadConfigUsesLegacySessionAndOAuthSecretsWhenFilesAreAbsent(t *testing
 }
 
 func TestLoadConfigSupportsLegacyDevelopmentComposeConfiguration(t *testing.T) {
+	dir := t.TempDir()
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("GITEA_API_URL", "http://gitea:3000")
 	t.Setenv("SESSION_SECRET_FILE", "")
 	t.Setenv("SESSION_SECRET", strings.Repeat("s", 32))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
 	t.Setenv("OAUTH_CLIENT_ID", "legacy-client")
 	t.Setenv("OAUTH_CLIENT_SECRET_FILE", "")
 	t.Setenv("OAUTH_CLIENT_SECRET", "legacy-oauth-secret")
@@ -162,6 +183,7 @@ func TestLoadConfigRejectsOAuthClientWithoutSecret(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
 	t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
 	t.Setenv("OAUTH_CLIENT_ID", "client-id")
 	t.Setenv("OAUTH_CLIENT_SECRET_FILE", "")
 	t.Setenv("OAUTH_CLIENT_SECRET", "")
@@ -206,6 +228,7 @@ func TestLegacyMigrationDeliversWebhookAndRegistersUserAndOrganizationHooks(t *t
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("GITEA_API_URL", gitea.URL)
 	t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
 	t.Setenv("LEGACY_WEBHOOK_SECRET_FILE", "")
 	t.Setenv("WEBHOOK_SECRET", secret)
 

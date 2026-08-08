@@ -324,7 +324,7 @@ func TestHandleStatus_WithAuth(t *testing.T) {
 	username := "testuser"
 
 	// Create token store with user
-	tokenStore := NewTokenStore(t.TempDir())
+	tokenStore := newTestTokenStore(t)
 	defer tokenStore.Close()
 
 	tokenStore.Set(username, &UserToken{

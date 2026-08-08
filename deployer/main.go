@@ -112,7 +112,10 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY_FILE: %w", err)
 	}
-	if len(tokenEncryptionKey) > 0 && len(tokenEncryptionKey) != 32 {
+	if len(tokenEncryptionKey) == 0 {
+		return nil, errors.New("TOKEN_ENCRYPTION_KEY_FILE is required")
+	}
+	if len(tokenEncryptionKey) != 32 {
 		return nil, errors.New("TOKEN_ENCRYPTION_KEY_FILE must contain exactly 32 bytes")
 	}
 
@@ -293,7 +296,10 @@ func main() {
 	deployer := NewDeployer(config)
 
 	// Initialize token store for OAuth with SQLite persistence
-	tokenStore := NewTokenStore(config.DataDir)
+	tokenStore, err := NewTokenStore(config.DataDir, config.TokenEncryptionKey)
+	if err != nil {
+		log.Fatalf("Failed to initialize encrypted token store: %v", err)
+	}
 
 	// Connect token store to deployer for private repo access
 	deployer.SetTokenStore(tokenStore)

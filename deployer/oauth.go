@@ -488,17 +488,21 @@ func (h *OAuthHandler) RefreshAllTokens() {
 			continue
 		}
 
-		// Update token in store
-		token.AccessToken = newToken.AccessToken
-		token.TokenType = newToken.TokenType
-		if newToken.RefreshToken != "" {
-			token.RefreshToken = newToken.RefreshToken
+		if err := h.store.UpdateToken(username, func(updated UserToken) UserToken {
+			updated.AccessToken = newToken.AccessToken
+			updated.TokenType = newToken.TokenType
+			if newToken.RefreshToken != "" {
+				updated.RefreshToken = newToken.RefreshToken
+			}
+			if newToken.ExpiresIn > 0 {
+				updated.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+			}
+			updated.CreatedAt = time.Now()
+			return updated
+		}); err != nil {
+			log.Printf("Failed to persist refreshed token for %s: %v", username, err)
+			continue
 		}
-		if newToken.ExpiresIn > 0 {
-			token.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
-		}
-		token.CreatedAt = time.Now()
-		h.store.Set(username, token)
 
 		log.Printf("Token refreshed successfully for %s", username)
 	}

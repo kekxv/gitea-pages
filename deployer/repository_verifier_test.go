@@ -55,7 +55,7 @@ func TestVerifyRepositoryUsesPrincipalTokenAndCanonicalMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store := NewTokenStore(t.TempDir())
+	store := newTestTokenStore(t)
 	t.Cleanup(func() { _ = store.Close() })
 	store.Set("maintainer", &UserToken{AccessToken: "principal-token"})
 	verifier, err := NewRepositoryVerifier(server.URL, store)
@@ -161,7 +161,7 @@ func newVerifierWithRepo(t *testing.T, repo RepoInfo) RepositoryVerifier {
 	}))
 	t.Cleanup(server.Close)
 
-	store := NewTokenStore(t.TempDir())
+	store := newTestTokenStore(t)
 	t.Cleanup(func() { _ = store.Close() })
 	for _, username := range []string{"alice", "attacker", "maintainer"} {
 		store.Set(username, &UserToken{AccessToken: username + "-token"})
