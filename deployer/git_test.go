@@ -1,10 +1,52 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// This would fail if a set-ID or sticky checkout entry were normalized and
+// published instead of rejected before it reaches staging.
+func TestCopyFilesRejectsSetIDAndStickyModes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		dir  bool
+	}{
+		{"setuid file", os.ModeSetuid, false},
+		{"setgid file", os.ModeSetgid, false},
+		{"sticky directory", os.ModeSticky, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dst := t.TempDir(), t.TempDir()
+			path := filepath.Join(src, "entry")
+			if tc.dir {
+				if err := os.Mkdir(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("content"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0755|tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&tc.mode == 0 {
+				t.Fatalf("test filesystem did not retain requested mode %v: got %v", tc.mode, info.Mode())
+			}
+
+			err = (&GitOperations{maxSiteSizeMB: 1}).copyFiles(src, dst)
+			if !errors.Is(err, ErrUnsafeCheckoutContent) {
+				t.Fatalf("expected unsafe content rejection, got %v", err)
+			}
+		})
+	}
+}
 
 func TestRemoveGitDir(t *testing.T) {
 	// Create temp directory with .git folder

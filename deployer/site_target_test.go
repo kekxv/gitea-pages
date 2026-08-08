@@ -288,7 +288,9 @@ func TestAtomicReplaceReplacesOnlyTheValidatedTarget(t *testing.T) {
 	}
 }
 
-func TestAtomicReplaceRestoresExistingSiteWhenInstallFails(t *testing.T) {
+// This would fail if an existing target were first moved aside before the new
+// site is published: a failed exchange must leave both paths unchanged.
+func TestAtomicReplaceLeavesLiveSiteUntouchedWhenExchangeFails(t *testing.T) {
 	root := t.TempDir()
 	target, err := NewSiteTarget(root, "alice", "site", "example.com")
 	if err != nil {
@@ -308,13 +310,8 @@ func TestAtomicReplaceRestoresExistingSiteWhenInstallFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	renameCalls := 0
-	err = replaceSiteAtomicallyWithRename(staging, target, func(oldPath, newPath string) error {
-		renameCalls++
-		if renameCalls == 2 {
-			return errors.New("injected install failure")
-		}
-		return os.Rename(oldPath, newPath)
+	err = replaceSiteAtomicallyWithExchange(staging, target, func(_, _ string) error {
+		return errors.New("injected exchange failure")
 	})
 	if err == nil {
 		t.Fatal("replacement unexpectedly succeeded")

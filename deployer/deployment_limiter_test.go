@@ -73,6 +73,59 @@ func TestDeploymentLimiterSerializesSameTarget(t *testing.T) {
 	}
 }
 
+// This would fail if a waiter for an already-active target took a global slot
+// before it obtained that target's lock, starving unrelated deployments.
+func TestDeploymentLimiterSameTargetWaiterDoesNotConsumeGlobalSlot(t *testing.T) {
+	limiter := NewDeploymentLimiter(2)
+	firstRelease, err := limiter.Acquire(context.Background(), "alice/site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstRelease()
+
+	waiterDone := make(chan struct{})
+	go func() {
+		release, acquireErr := limiter.Acquire(context.Background(), "alice/site")
+		if acquireErr == nil {
+			release()
+		}
+		close(waiterDone)
+	}()
+	waitForTargetReference(t, limiter, "alice/site", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	otherRelease, err := limiter.Acquire(ctx, "bob/site")
+	if err != nil {
+		t.Fatalf("unrelated target was starved by same-target waiter: %v", err)
+	}
+	otherRelease()
+	firstRelease()
+	select {
+	case <-waiterDone:
+	case <-time.After(time.Second):
+		t.Fatal("same-target waiter did not complete after release")
+	}
+}
+
+func waitForTargetReference(t *testing.T, limiter *DeploymentLimiter, target string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		limiter.mu.Lock()
+		got := 0
+		if entry := limiter.targets[target]; entry != nil {
+			got = entry.refs
+		}
+		limiter.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("target %q did not reach %d waiting references", target, want)
+}
+
 // This would fail if repository metadata were ignored until after a clone was
 // started, allowing an over-limit repository to consume deployment resources.
 func TestDeploymentServiceRejectsOversizedRepository(t *testing.T) {

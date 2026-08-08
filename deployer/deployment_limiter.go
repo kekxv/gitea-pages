@@ -36,8 +36,9 @@ func NewDeploymentLimiter(maxConcurrent int) *DeploymentLimiter {
 	}
 }
 
-// Acquire waits for both a global slot and an exclusive lock for target.
-// The returned release function must be called exactly once.
+// Acquire takes the target lock before waiting for a global slot, so queued
+// work for one target cannot occupy capacity needed by unrelated targets. The
+// returned release function must be called exactly once.
 func (l *DeploymentLimiter) Acquire(ctx context.Context, target string) (func(), error) {
 	if l == nil {
 		return nil, fmt.Errorf("deployment limiter is required")
@@ -45,16 +46,6 @@ func (l *DeploymentLimiter) Acquire(ctx context.Context, target string) (func(),
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	select {
-	case l.slots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	if err := ctx.Err(); err != nil {
-		<-l.slots
-		return nil, err
-	}
-
 	l.mu.Lock()
 	entry := l.targets[target]
 	if entry == nil {
@@ -69,21 +60,33 @@ func (l *DeploymentLimiter) Acquire(ctx context.Context, target string) (func(),
 		if err := ctx.Err(); err != nil {
 			<-entry.locked
 			l.releaseReference(target, entry)
-			<-l.slots
 			return nil, err
 		}
 	case <-ctx.Done():
 		l.releaseReference(target, entry)
-		<-l.slots
+		return nil, ctx.Err()
+	}
+
+	select {
+	case l.slots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-l.slots
+			<-entry.locked
+			l.releaseReference(target, entry)
+			return nil, err
+		}
+	case <-ctx.Done():
+		<-entry.locked
+		l.releaseReference(target, entry)
 		return nil, ctx.Err()
 	}
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			<-l.slots
 			<-entry.locked
 			l.releaseReference(target, entry)
-			<-l.slots
 		})
 	}, nil
 }

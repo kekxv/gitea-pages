@@ -188,6 +188,9 @@ func (g *GitOperations) copyFiles(src, dst string) error {
 		// filepath.Walk presents Lstat metadata. Refuse any object whose
 		// contents could resolve outside the checkout or have special I/O
 		// behavior before creating anything in the staging directory.
+		if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+			return fmt.Errorf("%w: privileged mode on %q", ErrUnsafeCheckoutContent, relPath)
+		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%w: symlink %q", ErrUnsafeCheckoutContent, relPath)
 		}
@@ -295,57 +298,6 @@ func (g *GitOperations) validateTarget(target SiteTarget) error {
 		return fmt.Errorf("site target: %w", ErrUnsafeSiteTarget)
 	}
 	return target.validateExistingPath()
-}
-
-func replaceSiteAtomically(staging string, target SiteTarget) error {
-	return replaceSiteAtomicallyWithRename(staging, target, os.Rename)
-}
-
-func replaceSiteAtomicallyWithRename(staging string, target SiteTarget, rename func(string, string) error) error {
-	if err := target.validateExistingPath(); err != nil {
-		return err
-	}
-	parent := filepath.Dir(target.Path())
-	stagingAbs, err := filepath.Abs(staging)
-	if err != nil {
-		return fmt.Errorf("resolve deployment staging directory: %w", err)
-	}
-	if filepath.Dir(stagingAbs) != parent {
-		return fmt.Errorf("staging directory: %w", ErrUnsafeSiteTarget)
-	}
-	stagingInfo, err := os.Lstat(stagingAbs)
-	if err != nil {
-		return fmt.Errorf("inspect deployment staging directory: %w", err)
-	}
-	if !stagingInfo.IsDir() || stagingInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("staging directory: %w", ErrUnsafeSiteTarget)
-	}
-
-	if _, err := os.Lstat(target.Path()); os.IsNotExist(err) {
-		return rename(stagingAbs, target.Path())
-	} else if err != nil {
-		return err
-	}
-	backup, err := os.MkdirTemp(parent, ".previous-")
-	if err != nil {
-		return fmt.Errorf("create previous-site path: %w", err)
-	}
-	if err := os.Remove(backup); err != nil {
-		return fmt.Errorf("prepare previous-site path: %w", err)
-	}
-	if err := rename(target.Path(), backup); err != nil {
-		return fmt.Errorf("move previous site: %w", err)
-	}
-	if err := rename(stagingAbs, target.Path()); err != nil {
-		if restoreErr := rename(backup, target.Path()); restoreErr != nil {
-			return fmt.Errorf("install replacement: %w (restore previous site: %v)", err, restoreErr)
-		}
-		return fmt.Errorf("install replacement: %w", err)
-	}
-	if err := os.RemoveAll(backup); err != nil {
-		return fmt.Errorf("remove previous site: %w", err)
-	}
-	return nil
 }
 
 // CalculateDirSize calculates the total size of a directory in bytes
