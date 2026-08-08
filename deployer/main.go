@@ -304,6 +304,14 @@ func oauthConfigFromAppConfig(config *Config) *OAuthConfig {
 }
 
 func main() {
+	if handled, err := runSecurityMigrationCommand(os.Args[1:]); handled {
+		if err != nil {
+			log.Printf("Security migration command failed: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	config, err := LoadConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)

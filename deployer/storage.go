@@ -101,8 +101,40 @@ func (s *TokenStore) initDB() (err error) {
 	}
 	defer tx.Rollback()
 
-	// Create the encrypted token schema and preserve existing hook data.
-	createTableSQL := `
+	if err := createSecureStorageSchema(context.Background(), tx); err != nil {
+		return err
+	}
+
+	var hasLegacyTable int
+	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_tokens')`).Scan(&hasLegacyTable)
+	if err != nil {
+		return fmt.Errorf("inspect legacy token schema: %w", err)
+	}
+	if hasLegacyTable == 1 {
+		var hasPlaintextRows int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM user_tokens LIMIT 1)`).Scan(&hasPlaintextRows); err != nil {
+			return fmt.Errorf("inspect legacy tokens: %w", err)
+		}
+		if hasPlaintextRows == 1 {
+			return fmt.Errorf("plaintext user_tokens rows detected; run the Task 10 token migration command before starting the server")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit token schema migration: %w", err)
+	}
+
+	s.db = db
+	if err := s.cleanupExpiredDeliveries(context.Background()); err != nil {
+		return fmt.Errorf("failed to clean expired webhook deliveries: %w", err)
+	}
+	return nil
+}
+
+// createSecureStorageSchema creates the encrypted token and hook credential
+// tables inside a caller-owned transaction. The offline security migration uses
+// the same schema so a failed migration can roll back every local change.
+func createSecureStorageSchema(ctx context.Context, tx *sql.Tx) error {
+	const createTableSQL = `
 	CREATE TABLE IF NOT EXISTS user_tokens_v2 (
 		username TEXT PRIMARY KEY,
 		access_token_ciphertext BLOB NOT NULL,
@@ -139,32 +171,9 @@ func (s *TokenStore) initDB() (err error) {
 	CREATE INDEX IF NOT EXISTS idx_organization_hook_authorizers_hook_key ON organization_hook_authorizers(hook_key);
 	`
 
-	_, err = tx.Exec(createTableSQL)
+	_, err := tx.ExecContext(ctx, createTableSQL)
 	if err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
-	}
-
-	var hasLegacyTable int
-	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_tokens')`).Scan(&hasLegacyTable)
-	if err != nil {
-		return fmt.Errorf("inspect legacy token schema: %w", err)
-	}
-	if hasLegacyTable == 1 {
-		var hasPlaintextRows int
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM user_tokens LIMIT 1)`).Scan(&hasPlaintextRows); err != nil {
-			return fmt.Errorf("inspect legacy tokens: %w", err)
-		}
-		if hasPlaintextRows == 1 {
-			return fmt.Errorf("plaintext user_tokens rows detected; run the Task 10 token migration command before starting the server")
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit token schema migration: %w", err)
-	}
-
-	s.db = db
-	if err := s.cleanupExpiredDeliveries(context.Background()); err != nil {
-		return fmt.Errorf("failed to clean expired webhook deliveries: %w", err)
+		return fmt.Errorf("create encrypted storage schema: %w", err)
 	}
 	return nil
 }
