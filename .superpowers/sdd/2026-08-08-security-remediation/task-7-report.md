@@ -34,3 +34,11 @@ Each focused test was rerun green after the minimal implementation change.
 - `git diff --check` — PASS
 
 The Go toolchain is installed at `/usr/local/go/bin` but is not on PATH in this environment.
+
+## Round 1: Credential key canonicalization
+
+- Hook storage now keeps the raw 32-byte random key. Gitea receives the Raw-Base64URL encoding of that key in `Authorization: Gitea-Pages <key>`, matching `AuthenticateWebhook`'s existing decode-before-lookup contract.
+- Existing-hook lookup decodes the Gitea authorization header before reading storage, so repeat organization authorization still preserves the admin pool instead of replacing the hook.
+- Red: `TestRegisteredHookAuthenticatesSignedDelivery` failed with `unknown webhook hook` when it sent the exact authorization header emitted during Gitea registration.
+- Green: the end-to-end registration → exact-header signed delivery → `AuthenticateWebhook` test passes, as does the organization-pool regression.
+- Final: `/usr/local/go/bin/go test -count=1 ./...` and `/usr/local/go/bin/go test -count=1 -race ./...` both PASS; `git diff --check` PASS.

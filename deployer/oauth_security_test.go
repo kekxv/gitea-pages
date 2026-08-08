@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,8 +22,8 @@ func TestCreateHookCredentialGeneratesIndependentBase64URLCredentials(t *testing
 	if err != nil {
 		t.Fatalf("create Bob credential: %v", err)
 	}
-	if len(a.Key) != 43 || len(a.Secret) != 43 {
-		t.Fatalf("credential encoding lengths = key %d, secret %d; want 43-byte raw base64url values", len(a.Key), len(a.Secret))
+	if len(a.Key) != 32 || len(a.Secret) != 43 {
+		t.Fatalf("credential lengths = key %d, secret %d; want a 32-byte stored key and 43-byte raw base64url secret", len(a.Key), len(a.Secret))
 	}
 	if a.Key == b.Key || bytes.Equal(a.Secret, b.Secret) {
 		t.Fatal("independent hook credentials were reused")
@@ -190,7 +191,11 @@ func TestRegisterWebhooksCreatesAndStoresDistinctUserAndOrganizationCredentials(
 		if len(registered.AuthorizationHeader) <= len(prefix) || registered.AuthorizationHeader[:len(prefix)] != prefix {
 			t.Fatalf("Authorization header = %q, want Gitea-Pages key", registered.AuthorizationHeader)
 		}
-		credential, err := store.GetHook(context.Background(), registered.AuthorizationHeader[len(prefix):])
+		key, err := base64.RawURLEncoding.DecodeString(registered.AuthorizationHeader[len(prefix):])
+		if err != nil {
+			t.Fatalf("decode registered key: %v", err)
+		}
+		credential, err := store.GetHook(context.Background(), string(key))
 		if err != nil {
 			t.Fatalf("load stored credential: %v", err)
 		}
@@ -203,6 +208,57 @@ func TestRegisterWebhooksCreatesAndStoresDistinctUserAndOrganizationCredentials(
 	}
 	if registrations[0].AuthorizationHeader == registrations[1].AuthorizationHeader || registrations[0].Secret == registrations[1].Secret {
 		t.Fatal("user and organization hooks must not share credentials")
+	}
+}
+
+func TestRegisteredHookAuthenticatesSignedDelivery(t *testing.T) {
+	var authorizationHeader, secret string
+	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/hooks":
+			json.NewEncoder(w).Encode([]webhookInfo{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/user/hooks":
+			var payload struct {
+				Config              map[string]string `json:"config"`
+				AuthorizationHeader string            `json:"authorization_header"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode registration: %v", err)
+			}
+			authorizationHeader = payload.AuthorizationHeader
+			secret = payload.Config["secret"]
+			json.NewEncoder(w).Encode(webhookInfo{ID: 91})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gitea.Close()
+
+	store, err := NewTokenStore(t.TempDir(), bytes.Repeat([]byte("k"), 32))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	defer store.Close()
+	h := NewOAuthHandler(&OAuthConfig{APIURL: gitea.URL, DisableOrganizationHooks: true}, store, "https://pages.example.com/webhook", "session-secret")
+	if err := h.registerUserWebhook("alice-token", "alice"); err != nil {
+		t.Fatalf("register user hook: %v", err)
+	}
+	const prefix = "Gitea-Pages "
+	if !strings.HasPrefix(authorizationHeader, prefix) {
+		t.Fatalf("authorization header = %q, want %q prefix", authorizationHeader, prefix)
+	}
+	body := []byte(`{"repository":{"id":42}}`)
+	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	request.Header.Set("Authorization", authorizationHeader)
+	request.Header.Set("X-Gitea-Delivery", "registered-delivery")
+	request.Header.Set("X-Gitea-Signature", computeSignature(string(body), secret))
+
+	authenticated, err := AuthenticateWebhook(context.Background(), request, store)
+	if err != nil {
+		t.Fatalf("AuthenticateWebhook registered delivery: %v", err)
+	}
+	if got, want := authenticated.Principal, (HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}); got != want {
+		t.Errorf("authenticated principal = %#v, want %#v", got, want)
 	}
 }
 

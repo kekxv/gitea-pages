@@ -85,7 +85,7 @@ func createHookCredential(principal HookPrincipal) (HookCredential, error) {
 		return HookCredential{}, fmt.Errorf("generate hook secret: %w", err)
 	}
 	return HookCredential{
-		Key:               base64.RawURLEncoding.EncodeToString(key),
+		Key:               string(key),
 		Secret:            []byte(base64.RawURLEncoding.EncodeToString(secret)),
 		PrincipalUsername: principal.Username,
 		ScopeType:         principal.ScopeType,
@@ -865,8 +865,12 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 		return err
 	}
 	if existing != nil && strings.HasPrefix(existing.AuthorizationHeader, "Gitea-Pages ") {
-		key := strings.TrimPrefix(existing.AuthorizationHeader, "Gitea-Pages ")
-		stored, err := h.store.GetHook(ctx, key)
+		encodedKey := strings.TrimPrefix(existing.AuthorizationHeader, "Gitea-Pages ")
+		key, err := base64.RawURLEncoding.DecodeString(encodedKey)
+		if err != nil || len(key) == 0 {
+			return fmt.Errorf("decode existing hook credential key")
+		}
+		stored, err := h.store.GetHook(ctx, string(key))
 		if err != nil {
 			return fmt.Errorf("load existing hook credential: %w", err)
 		}
@@ -923,7 +927,7 @@ func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interfa
 		"events":               []string{"push", "delete"},
 		"active":               true,
 		"branch_filter":        "gh-pages",
-		"authorization_header": "Gitea-Pages " + credential.Key,
+		"authorization_header": "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(credential.Key)),
 	}
 }
 
