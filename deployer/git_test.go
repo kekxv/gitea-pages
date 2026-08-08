@@ -60,10 +60,10 @@ func TestIsAllowedHiddenFile(t *testing.T) {
 		name     string
 		expected bool
 	}{
-		{".htaccess", true},
+		{".htaccess", false},
 		{".well-known", true},
 		{".nojekyll", true},
-		{".gitignore", true},
+		{".gitignore", false},
 		{".git", false},
 		{".env", false},
 		{".secret", false},

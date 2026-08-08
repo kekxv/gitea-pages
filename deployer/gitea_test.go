@@ -6,57 +6,6 @@ import (
 	"testing"
 )
 
-func TestPrepareCloneURL(t *testing.T) {
-	tests := []struct {
-		name        string
-		cloneURL    string
-		accessToken string
-		sshKeyPath  string
-		expected    string
-	}{
-		{
-			name:        "no auth - original URL",
-			cloneURL:    "https://gitea.example.com/owner/repo.git",
-			accessToken: "",
-			sshKeyPath:  "",
-			expected:    "https://gitea.example.com/owner/repo.git",
-		},
-		{
-			name:        "SSH key configured - convert to SSH URL",
-			cloneURL:    "https://gitea.example.com/owner/repo.git",
-			accessToken: "",
-			sshKeyPath:  "/path/to/key",
-			expected:    "git@gitea.example.com:owner/repo.git",
-		},
-		{
-			name:        "access token - inject into HTTPS URL",
-			cloneURL:    "https://gitea.example.com/owner/repo.git",
-			accessToken: "my-token",
-			sshKeyPath:  "",
-			expected:    "https://my-token@gitea.example.com/owner/repo.git",
-		},
-		{
-			name:        "SSH takes precedence over token",
-			cloneURL:    "https://gitea.example.com/owner/repo.git",
-			accessToken: "my-token",
-			sshKeyPath:  "/path/to/key",
-			expected:    "git@gitea.example.com:owner/repo.git",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := PrepareCloneURL(tt.cloneURL, tt.accessToken, tt.sshKeyPath)
-			if err != nil {
-				t.Errorf("PrepareCloneURL failed: %v", err)
-			}
-			if result != tt.expected {
-				t.Errorf("PrepareCloneURL() = %s, expected %s", result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestIsTrustedCloneURL(t *testing.T) {
 	trustedAPI := "https://gitea.example.com/api/v1"
 	tests := []struct {
@@ -154,19 +103,5 @@ func TestGiteaClient_NotConfigured(t *testing.T) {
 	}
 	if repoInfo != nil {
 		t.Error("Should return nil when API not configured")
-	}
-}
-
-func TestSetupSSHKey_NotExists(t *testing.T) {
-	err := SetupSSHKey("/nonexistent/path/key")
-	if err == nil {
-		t.Error("Expected error for non-existent SSH key")
-	}
-}
-
-func TestSetupSSHKey_EmptyPath(t *testing.T) {
-	err := SetupSSHKey("")
-	if err != nil {
-		t.Errorf("SetupSSHKey with empty path should succeed: %v", err)
 	}
 }

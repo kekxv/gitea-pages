@@ -36,8 +36,6 @@ services:
       - ${TOKEN_ENCRYPTION_KEY_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_token_encryption_key:ro
       - ${OAUTH_CLIENT_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_oauth_client_secret:ro
       - ${LEGACY_WEBHOOK_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_legacy_webhook_secret:ro
-      # Optional: SSH deploy key for private repos
-      # - ./deploy-key:/var/www/pages/.ssh/id_rsa:ro
     ports:
       - "8080:8080"
 

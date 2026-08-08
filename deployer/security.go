@@ -1,11 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+)
+
+var (
+	ErrUnsafeCheckoutContent = errors.New("unsafe checkout content")
+	ErrSiteTooLarge          = errors.New("site exceeds deployment size limit")
 )
 
 // SetSecurePermissions sets restrictive permissions on files and directories

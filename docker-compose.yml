@@ -53,8 +53,6 @@ services:
       - ${TOKEN_ENCRYPTION_KEY_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_token_encryption_key:ro
       - ${OAUTH_CLIENT_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_oauth_client_secret:ro
       - ${LEGACY_WEBHOOK_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_legacy_webhook_secret:ro
-      # SSH key for private repository access (optional)
-      - ${GITEA_SSH_KEY_PATH:-/dev/null}:/var/www/pages/.ssh/id_rsa:ro
     environment:
       - DOMAIN=${DOMAIN:-yourdomain.com}
       - APP_ENV=${APP_ENV:-production}
@@ -70,7 +68,6 @@ services:
       - MAX_SITE_SIZE_MB=${MAX_SITE_SIZE_MB:-100}
       - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
       - GITEA_API_URL=${GITEA_API_URL:-}
-      - GITEA_SSH_KEY_PATH=${GITEA_SSH_KEY_PATH:-}
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
       - OAUTH_CLIENT_SECRET_FILE=${OAUTH_CLIENT_SECRET_HOST_FILE:+/run/secrets/gitea_pages_oauth_client_secret}
       - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}

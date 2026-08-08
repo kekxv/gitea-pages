@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -116,52 +113,4 @@ func IsTrustedCloneURL(cloneURL, trustedAPIURL string) bool {
 	}
 	_, err = ValidateCanonicalCloneURL(cloneURL, parsedTrusted)
 	return err == nil
-}
-
-// PrepareCloneURL prepares authenticated clone URL
-func PrepareCloneURL(cloneURL string, accessToken string, sshKeyPath string) (string, error) {
-	parsed, err := url.Parse(cloneURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid clone URL: %w", err)
-	}
-
-	// If SSH key is configured, convert HTTPS URL to SSH
-	if sshKeyPath != "" {
-		if parsed.Scheme == "https" {
-			sshURL := fmt.Sprintf("git@%s:%s", parsed.Host, strings.TrimPrefix(parsed.Path, "/"))
-			return sshURL, nil
-		}
-	}
-
-	// Use access token for HTTPS clone
-	if accessToken != "" && parsed.Scheme == "https" {
-		// Set user as token for Basic Auth
-		parsed.User = url.User(accessToken)
-		return parsed.String(), nil
-	}
-
-	return cloneURL, nil
-}
-
-// SetupSSHKey prepares SSH key for git operations
-func SetupSSHKey(sshKeyPath string) error {
-	if sshKeyPath == "" {
-		return nil
-	}
-
-	sshDir := filepath.Dir(sshKeyPath)
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		return fmt.Errorf("failed to create SSH dir: %w", err)
-	}
-
-	info, err := os.Stat(sshKeyPath)
-	if err != nil {
-		return fmt.Errorf("SSH key not accessible: %w", err)
-	}
-
-	if info.Mode().Perm() != 0600 {
-		fmt.Printf("Warning: SSH key has incorrect permissions %v, should be 0600\n", info.Mode().Perm())
-	}
-
-	return nil
 }

@@ -41,7 +41,6 @@ type Config struct {
 	WebhookSecret    string
 	EnableHTTPS      bool
 	GiteaAccessToken string
-	GiteaSSHKeyPath  string
 }
 
 // LoadConfig reads configuration from environment variables
@@ -151,7 +150,6 @@ func LoadConfig() (*Config, error) {
 		WebhookSecret:           webhookSecret,
 		EnableHTTPS:             enableHTTPS,
 		GiteaAccessToken:        os.Getenv("GITEA_ACCESS_TOKEN"),
-		GiteaSSHKeyPath:         getEnvOrDefault("GITEA_SSH_KEY_PATH", ""),
 	}, nil
 }
 
@@ -383,10 +381,6 @@ func main() {
 			go autoRegisterWebhooks(config)
 		}
 	}
-	if config.GiteaSSHKeyPath != "" {
-		log.Printf("SSH Key configured: %s", config.GiteaSSHKeyPath)
-	}
-
 	if config.OAuthClientID != "" {
 		log.Printf("OAuth2 enabled: %s", config.GiteaAPIURL)
 	}

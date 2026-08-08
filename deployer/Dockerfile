@@ -28,13 +28,11 @@ ARG PGID=1000
 
 RUN addgroup -g ${PGID} -S pagesgroup && \
     adduser -u ${PUID} -S pagesuser -G pagesgroup -h /var/www/pages && \
-    # Install git, openssh for SSH-based private repo access, and wget for health check
-    apk add --no-cache git openssh-client wget && \
-    # Create necessary directories including SSH directory and data directory
-    mkdir -p /var/www/pages /var/www/pages/.ssh /var/lib/deployer /var/log && \
+    # HTTPS-only Git deployment and health checks
+    apk add --no-cache git wget && \
+    mkdir -p /var/www/pages /var/lib/deployer /var/log && \
     # Set ownership
-    chown -R pagesuser:pagesgroup /var/www/pages /var/lib/deployer /var/log && \
-    chmod 700 /var/www/pages/.ssh
+    chown -R pagesuser:pagesgroup /var/www/pages /var/lib/deployer /var/log
 
 # Copy binary from builder
 COPY --from=builder /build/deployer /usr/local/bin/deployer

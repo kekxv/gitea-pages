@@ -4,18 +4,75 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+const gitAskPassTokenEnv = "GITEA_PAGES_GIT_TOKEN"
+
+// runGitClone runs a shallow HTTPS clone under the supplied deadline. Tokens
+// are provided only to a short-lived askpass helper, never in argv or URLs.
+func runGitClone(ctx context.Context, gitBinary string, cloneURL *url.URL, targetDir, token string) error {
+	if cloneURL == nil || cloneURL.Scheme != "https" || cloneURL.Host == "" || cloneURL.User != nil || cloneURL.RawQuery != "" || cloneURL.Fragment != "" {
+		return fmt.Errorf("invalid HTTPS clone URL")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(ctx, gitBinary,
+		"-c", "protocol.file.allow=never",
+		"-c", "protocol.ext.allow=never",
+		"-c", "protocol.git.allow=never",
+		"clone", "--branch", "gh-pages", "--single-branch", "--depth", "1", "--", cloneURL.String(), targetDir,
+	)
+	cmd.Env = []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=/tmp/gitea-pages-home",
+		"LANG=C.UTF-8",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_LFS_SKIP_SMUDGE=1",
+	}
+	if token != "" {
+		askPass, err := writeGitAskPass(filepath.Dir(targetDir))
+		if err != nil {
+			return err
+		}
+		defer os.Remove(askPass)
+		cmd.Env = append(cmd.Env, "GIT_ASKPASS="+askPass, gitAskPassTokenEnv+"="+token)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return fmt.Errorf("git clone failed: %w, output: %s", err, SanitizeGitOutput(string(output)))
+	}
+	return nil
+}
+
+func writeGitAskPass(dir string) (string, error) {
+	path := filepath.Join(dir, ".git-askpass")
+	contents := "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$" + gitAskPassTokenEnv + "\" ;;\n  *) printf '\\n' ;;\nesac\n"
+	if err := os.WriteFile(path, []byte(contents), 0700); err != nil {
+		return "", fmt.Errorf("create git askpass helper: %w", err)
+	}
+	return path, nil
+}
 
 // GitOperations handles git clone and deployment operations
 type GitOperations struct {
 	pagesDir      string
 	maxSiteSizeMB int64
-	sshKeyPath    string
+	cloneTimeout  time.Duration
+	gitBinary     string
 	accessToken   string
 	giteaClient   *GiteaClient
 }
@@ -30,7 +87,8 @@ func NewGitOperations(config *Config) *GitOperations {
 	return &GitOperations{
 		pagesDir:      config.PagesDir,
 		maxSiteSizeMB: config.MaxSiteSizeMB,
-		sshKeyPath:    config.GiteaSSHKeyPath,
+		cloneTimeout:  config.CloneTimeout,
+		gitBinary:     "git",
 		accessToken:   config.GiteaAccessToken,
 		giteaClient:   giteaClient,
 	}
@@ -47,7 +105,13 @@ func (g *GitOperations) Deploy(ctx context.Context, repo VerifiedRepository, tar
 // DeployWithToken is retained until DeploymentService replaces legacy webhook
 // wiring. It accepts SiteTarget so it cannot introduce a raw destructive path.
 func (g *GitOperations) DeployWithToken(cloneURL string, target SiteTarget, owner, repo string, userToken string) error {
-	return g.deploy(context.Background(), cloneURL, target, owner, repo, userToken)
+	ctx := context.Background()
+	if g.cloneTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, g.cloneTimeout)
+		defer cancel()
+	}
+	return g.deploy(ctx, cloneURL, target, owner, repo, userToken)
 }
 
 func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target SiteTarget, owner, repo, userToken string) error {
@@ -57,29 +121,13 @@ func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target Site
 	if err := g.validateTarget(target); err != nil {
 		return err
 	}
-	// Pre-clone size check via Gitea API
-	if g.giteaClient != nil {
-		maxSizeBytes := g.maxSiteSizeMB * 1024 * 1024
-		if err := g.giteaClient.CheckRepoSizeBeforeClone(owner, repo, maxSizeBytes); err != nil {
-			return fmt.Errorf("pre-clone size check failed: %w", err)
-		}
+	clone, err := url.Parse(cloneURL)
+	if err != nil {
+		return fmt.Errorf("parse clone URL: %w", err)
 	}
-
-	// Prepare authenticated clone URL
 	token := userToken
 	if token == "" {
 		token = g.accessToken
-	}
-	authCloneURL, err := PrepareCloneURL(cloneURL, token, g.sshKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to prepare clone URL: %w", err)
-	}
-
-	// Setup SSH key if configured
-	if g.sshKeyPath != "" {
-		if err := SetupSSHKey(g.sshKeyPath); err != nil {
-			return fmt.Errorf("failed to setup SSH key: %w", err)
-		}
 	}
 
 	// Create temp directory for cloning
@@ -89,27 +137,12 @@ func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target Site
 	}
 	defer os.RemoveAll(tempDir) // Cleanup temp dir after deployment
 
-	// Clone repository with shallow clone
-	if err := g.cloneRepo(authCloneURL, tempDir, g.sshKeyPath); err != nil {
+	// Clone into an otherwise empty directory, leaving the short-lived askpass
+	// helper outside the checkout so it cannot be deployed.
+	checkoutDir := filepath.Join(tempDir, "repository")
+	if err := runGitClone(ctx, g.gitCommand(), clone, checkoutDir, token); err != nil {
 		return fmt.Errorf("failed to clone: %w", err)
 	}
-
-	// Remove .git directory from cloned repo
-	gitDir := filepath.Join(tempDir, ".git")
-	if err := RemoveGitDir(gitDir); err != nil {
-		log.Printf("Warning: failed to remove .git dir: %v", err)
-	}
-
-	// Security: Check site size before deployment
-	sizeBytes, err := CalculateDirSize(tempDir)
-	if err != nil {
-		return fmt.Errorf("failed to calculate size: %w", err)
-	}
-	maxSizeBytes := g.maxSiteSizeMB * 1024 * 1024
-	if sizeBytes > maxSizeBytes {
-		return fmt.Errorf("site size %d MB exceeds maximum allowed %d MB", sizeBytes/1024/1024, g.maxSiteSizeMB)
-	}
-	log.Printf("Site size: %d MB (limit: %d MB)", sizeBytes/1024/1024, g.maxSiteSizeMB)
 
 	// Staging is created beside the target so replacement remains on one
 	// filesystem and never exposes a partially copied site.
@@ -125,57 +158,23 @@ func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target Site
 		return fmt.Errorf("create deployment staging directory: %w", err)
 	}
 	defer os.RemoveAll(staging)
-	if err := g.copyFiles(tempDir, staging); err != nil {
+	if err := g.copyFiles(checkoutDir, staging); err != nil {
 		return fmt.Errorf("failed to copy files: %w", err)
-	}
-	if err := SetSecurePermissions(staging); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 	return replaceSiteAtomically(staging, target)
 }
 
-// cloneRepo performs a shallow clone of the repository
-func (g *GitOperations) cloneRepo(cloneURL, targetDir, sshKeyPath string) error {
-	// Security: Sanitize clone URL to prevent command injection
-	if strings.Contains(cloneURL, "&&") || strings.Contains(cloneURL, "||") {
-		return fmt.Errorf("invalid clone URL: contains dangerous characters")
+func (g *GitOperations) gitCommand() string {
+	if g.gitBinary == "" {
+		return "git"
 	}
-
-	cmd := exec.Command("git", "clone",
-		"--branch", "gh-pages",
-		"--single-branch",
-		"--depth", "1",
-		"--",
-		cloneURL,
-		targetDir,
-	)
-
-	// Setup environment for SSH or HTTPS authentication
-	cmdEnv := []string{
-		"GIT_TERMINAL_PROMPT=0", // Disable interactive prompts
-		"HOME=/tmp",
-	}
-
-	// Configure SSH key if provided
-	if sshKeyPath != "" {
-		cmdEnv = append(cmdEnv,
-			fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", sshKeyPath),
-		)
-	}
-
-	cmd.Env = cmdEnv
-
-	output, err := cmd.CombinedOutput()
-	sanitizedOutput := SanitizeGitOutput(string(output))
-	if err != nil {
-		return fmt.Errorf("git clone failed: %w, output: %s", err, sanitizedOutput)
-	}
-
-	return nil
+	return g.gitBinary
 }
 
 // copyFiles copies files from source to destination
 func (g *GitOperations) copyFiles(src, dst string) error {
+	maxBytes := g.maxSiteSizeMB * 1024 * 1024
+	var copied int64
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -186,50 +185,91 @@ func (g *GitOperations) copyFiles(src, dst string) error {
 			return err
 		}
 
-		dstPath := filepath.Join(dst, relPath)
-
-		// Security: Check for symlinks and reject them
+		// filepath.Walk presents Lstat metadata. Refuse any object whose
+		// contents could resolve outside the checkout or have special I/O
+		// behavior before creating anything in the staging directory.
 		if info.Mode()&os.ModeSymlink != 0 {
-			log.Printf("Warning: rejecting symlink at %s", path)
-			return nil // Skip symlinks
+			return fmt.Errorf("%w: symlink %q", ErrUnsafeCheckoutContent, relPath)
 		}
-
-		// Security: Reject hidden files (except .html, .css etc which are web files)
-		if strings.HasPrefix(info.Name(), ".") && !isAllowedHiddenFile(info.Name()) {
-			log.Printf("Warning: rejecting hidden file %s", path)
+		if relPath != "." && info.Name() == ".git" {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-
-		if info.IsDir() {
-			return os.MkdirAll(dstPath, 0755)
+		if relPath != "." && IsHiddenFile(info.Name()) {
+			if !(info.Name() == ".nojekyll" && info.Mode().IsRegular()) &&
+				!(info.Name() == ".well-known" && info.IsDir()) {
+				return fmt.Errorf("%w: hidden entry %q", ErrUnsafeCheckoutContent, relPath)
+			}
 		}
 
-		return copyFile(path, dstPath, info.Mode())
+		dstPath := filepath.Join(dst, relPath)
+		if info.IsDir() {
+			if err := os.MkdirAll(dstPath, 0755); err != nil {
+				return err
+			}
+			return os.Chmod(dstPath, 0755)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: non-regular entry %q", ErrUnsafeCheckoutContent, relPath)
+		}
+		if info.Size() > maxBytes-copied {
+			return fmt.Errorf("%w: more than %d bytes", ErrSiteTooLarge, maxBytes)
+		}
+		return copyFileBounded(path, dstPath, &copied, maxBytes)
 	})
 }
 
-// copyFile copies a single file
-func copyFile(src, dst string, mode os.FileMode) error {
+// copyFileBounded copies one regular file with its final deployment mode and
+// accounts for bytes as they are written, rather than trusting metadata alone.
+func copyFileBounded(src, dst string, copied *int64, maxBytes int64) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
 
-	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	return err
+	_, err = io.Copy(&maxSiteWriter{writer: dstFile, copied: copied, maxBytes: maxBytes}, srcFile)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(dst, 0644)
+}
+
+type maxSiteWriter struct {
+	writer   io.Writer
+	copied   *int64
+	maxBytes int64
+}
+
+func (w *maxSiteWriter) Write(p []byte) (int, error) {
+	remaining := w.maxBytes - *w.copied
+	if remaining <= 0 {
+		return 0, ErrSiteTooLarge
+	}
+	if int64(len(p)) > remaining {
+		n, err := w.writer.Write(p[:int(remaining)])
+		*w.copied += int64(n)
+		if err != nil {
+			return n, err
+		}
+		return n, ErrSiteTooLarge
+	}
+	n, err := w.writer.Write(p)
+	*w.copied += int64(n)
+	return n, err
 }
 
 // isAllowedHiddenFile checks if a hidden file should be allowed
 func isAllowedHiddenFile(name string) bool {
-	// Allow common web hidden files like .htaccess, .well-known
-	allowed := []string{".htaccess", ".well-known", ".nojekyll", ".gitignore"}
+	allowed := []string{".well-known", ".nojekyll"}
 	for _, a := range allowed {
 		if name == a || strings.HasPrefix(name, a+"/") {
 			return true
