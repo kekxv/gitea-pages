@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ type RepoInfo struct {
 	ID       int64  `json:"id"`
 	Name     string `json:"name"`
 	FullName string `json:"full_name"`
+	CloneURL string `json:"clone_url"`
 	Size     int64  `json:"size"` // Size in KB
 	Private  bool   `json:"private"`
 	Owner    struct {
@@ -41,13 +43,19 @@ type RepoInfo struct {
 
 // GetRepoInfo fetches repository information from Gitea API
 func (c *GiteaClient) GetRepoInfo(owner, repo string) (*RepoInfo, error) {
+	return c.GetRepoInfoContext(context.Background(), owner, repo)
+}
+
+// GetRepoInfoContext fetches repository information from Gitea API with the
+// caller's cancellation and deadline.
+func (c *GiteaClient) GetRepoInfoContext(ctx context.Context, owner, repo string) (*RepoInfo, error) {
 	if c.apiURL == "" || c.accessToken == "" {
 		return nil, nil // API not configured, skip pre-check
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/repos/%s/%s", c.apiURL, owner, repo)
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -102,21 +110,12 @@ func (c *GiteaClient) CheckRepoSizeBeforeClone(owner, repo string, maxSizeBytes 
 
 // IsTrustedCloneURL verifies if the clone URL belongs to the configured Gitea host
 func IsTrustedCloneURL(cloneURL, trustedAPIURL string) bool {
-	if trustedAPIURL == "" {
-		return true // No API URL configured, cannot verify (legacy mode)
-	}
-
-	parsedClone, err := url.Parse(cloneURL)
+	parsedTrusted, err := parseHTTPURL(trustedAPIURL)
 	if err != nil {
 		return false
 	}
-
-	parsedTrusted, err := url.Parse(trustedAPIURL)
-	if err != nil {
-		return false
-	}
-
-	return parsedClone.Host == parsedTrusted.Host
+	_, err = ValidateCanonicalCloneURL(cloneURL, parsedTrusted)
+	return err == nil
 }
 
 // PrepareCloneURL prepares authenticated clone URL

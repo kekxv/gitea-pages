@@ -234,6 +234,7 @@ func TestHandleWebhook_InvalidSignature(t *testing.T) {
 func TestHandleWebhook_NonGhPagesBranch(t *testing.T) {
 	config := &Config{
 		Domain:        "example.com",
+		GiteaAPIURL:   "https://gitea.example.com",
 		WebhookSecret: "test-secret",
 		PagesDir:      "/tmp/test-pages",
 		MaxSiteSizeMB: 100,
