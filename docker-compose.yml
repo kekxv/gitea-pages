@@ -53,6 +53,7 @@ services:
       - ${GITEA_SSH_KEY_PATH:-/dev/null}:/var/www/pages/.ssh/id_rsa:ro
     environment:
       - DOMAIN=${DOMAIN:-yourdomain.com}
+      - APP_ENV=${APP_ENV:-development}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_PORT=8080
       - PAGES_DATA_DIR=/var/www/pages

@@ -34,9 +34,10 @@ type Config struct {
 	MaxSiteSizeMB           int64
 	MaxRepositorySizeMB     int64
 	EnableOrganizationHooks bool
+	LegacyHooksEnabled      bool
 
-	// Deprecated compatibility fields. LoadConfig deliberately does not fill
-	// WebhookSecret: normal server mode must not accept a global webhook secret.
+	// Deprecated compatibility fields. They keep hooks delivering while existing
+	// installations rotate to per-webhook secrets.
 	WebhookSecret    string
 	EnableHTTPS      bool
 	GiteaAccessToken string
@@ -78,7 +79,7 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("ACQUIRE_TIMEOUT must be a positive duration")
 	}
 
-	enableOrganizationHooks, err := boolEnv("ENABLE_ORGANIZATION_HOOKS", false)
+	enableOrganizationHooks, err := boolEnv("ENABLE_ORGANIZATION_HOOKS", true)
 	if err != nil {
 		return nil, err
 	}
@@ -100,23 +101,27 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	sessionSecret, err := readSecretFile(os.Getenv("SESSION_SECRET_FILE"))
+	sessionSecret, err := loadOptionalSecretFile(os.Getenv("SESSION_SECRET_FILE"), os.Getenv("SESSION_SECRET"))
 	if err != nil {
 		return nil, fmt.Errorf("SESSION_SECRET_FILE: %w", err)
 	}
-	if len(sessionSecret) < 32 {
+	if len(sessionSecret) > 0 && len(sessionSecret) < 32 {
 		return nil, errors.New("SESSION_SECRET_FILE must contain at least 32 bytes")
 	}
 
-	tokenEncryptionKey, err := readSecretFile(os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"))
+	tokenEncryptionKey, err := loadOptionalSecretFile(os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"), "")
 	if err != nil {
 		return nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY_FILE: %w", err)
 	}
-	if len(tokenEncryptionKey) != 32 {
+	if len(tokenEncryptionKey) > 0 && len(tokenEncryptionKey) != 32 {
 		return nil, errors.New("TOKEN_ENCRYPTION_KEY_FILE must contain exactly 32 bytes")
 	}
 
-	oauthClientSecret, err := loadOAuthClientSecret(os.Getenv("OAUTH_CLIENT_ID"), os.Getenv("OAUTH_CLIENT_SECRET_FILE"))
+	oauthClientSecret, err := loadOAuthClientSecret(os.Getenv("OAUTH_CLIENT_SECRET_FILE"), os.Getenv("OAUTH_CLIENT_SECRET"))
+	if err != nil {
+		return nil, err
+	}
+	webhookSecret, legacyHooksEnabled, err := loadLegacyWebhookSecret(os.Getenv("LEGACY_WEBHOOK_SECRET_FILE"), os.Getenv("WEBHOOK_SECRET"))
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +147,8 @@ func LoadConfig() (*Config, error) {
 		MaxSiteSizeMB:           maxSizeMB,
 		MaxRepositorySizeMB:     maxRepositorySizeMB,
 		EnableOrganizationHooks: enableOrganizationHooks,
+		LegacyHooksEnabled:      legacyHooksEnabled,
+		WebhookSecret:           webhookSecret,
 		EnableHTTPS:             enableHTTPS,
 		GiteaAccessToken:        os.Getenv("GITEA_ACCESS_TOKEN"),
 		GiteaSSHKeyPath:         getEnvOrDefault("GITEA_SSH_KEY_PATH", ""),
@@ -160,18 +167,37 @@ func readSecretFile(path string) ([]byte, error) {
 	return b, nil
 }
 
-func loadOAuthClientSecret(clientID, path string) (string, error) {
+func loadOptionalSecretFile(path, legacyValue string) ([]byte, error) {
 	if path == "" {
-		if clientID != "" {
-			return "", errors.New("OAUTH_CLIENT_SECRET_FILE is required when OAUTH_CLIENT_ID is set")
-		}
-		return "", nil
+		return []byte(legacyValue), nil
+	}
+	return readSecretFile(path)
+}
+
+func loadOAuthClientSecret(path, legacyValue string) (string, error) {
+	if path == "" {
+		return legacyValue, nil
 	}
 	secret, err := readSecretFile(path)
 	if err != nil {
 		return "", fmt.Errorf("OAUTH_CLIENT_SECRET_FILE: %w", err)
 	}
 	return string(secret), nil
+}
+
+func loadLegacyWebhookSecret(path, legacyValue string) (string, bool, error) {
+	if path != "" {
+		secret, err := readSecretFile(path)
+		if err != nil {
+			return "", false, fmt.Errorf("LEGACY_WEBHOOK_SECRET_FILE: %w", err)
+		}
+		return string(secret), true, nil
+	}
+	if legacyValue != "" {
+		log.Printf("DEPRECATION WARNING: WEBHOOK_SECRET is supported only during migration; use LEGACY_WEBHOOK_SECRET_FILE before rotating hooks")
+		return legacyValue, true, nil
+	}
+	return "", false, nil
 }
 
 func validateGiteaURL(rawURL, appEnv string) error {
@@ -210,13 +236,14 @@ func parseHTTPURL(rawURL string) (*url.URL, error) {
 }
 
 func isLocalDevelopmentHost(host string) bool {
-	if host == "localhost" {
+	host = strings.ToLower(host)
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return true
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
+	if net.ParseIP(host) != nil {
+		return false
 	}
-	return host != "" && !strings.Contains(host, ".")
+	return host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")
 }
 
 func positiveInt(name, value string) (int, error) {
@@ -271,7 +298,7 @@ func main() {
 	deployer.SetTokenStore(tokenStore)
 
 	// Initialize web handler
-	webHandler := NewWebHandler(nil, tokenStore, config.Domain, "")
+	webHandler := NewWebHandler(nil, tokenStore, config.Domain, config.WebhookSecret)
 
 	// Initialize OAuth handler if configured
 	var oauthHandler *OAuthHandler
@@ -309,7 +336,7 @@ func main() {
 		log.Printf("OAuth Token URL (internal): %s", oauthConfig.TokenURL)
 		log.Printf("Webhook URL for OAuth registrations: %s", webhookURL)
 
-		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, "")
+		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, config.WebhookSecret)
 		webHandler.oauthConfig = oauthConfig
 		deployer.SetOAuthHandler(oauthHandler)
 

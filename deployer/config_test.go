@@ -24,16 +24,18 @@ func TestLoadConfigRejectsNonHTTPSGiteaOutsideDevelopment(t *testing.T) {
 	}
 }
 
-func TestLoadConfigUsesFileBasedSecrets(t *testing.T) {
+func TestLoadConfigPrefersLegacyWebhookSecretFile(t *testing.T) {
 	dir := t.TempDir()
 	sessionSecret := writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)+"\n")
 	encryptionKey := writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)+"\n")
+	legacyWebhookSecret := writeTestSecretFile(t, dir, "legacy-webhook", "file-webhook-secret\n")
 
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
 	t.Setenv("SESSION_SECRET_FILE", sessionSecret)
 	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", encryptionKey)
-	t.Setenv("WEBHOOK_SECRET", "must-not-be-loaded")
+	t.Setenv("LEGACY_WEBHOOK_SECRET_FILE", legacyWebhookSecret)
+	t.Setenv("WEBHOOK_SECRET", "environment-webhook-secret")
 
 	config, err := LoadConfig()
 	if err != nil {
@@ -45,8 +47,11 @@ func TestLoadConfigUsesFileBasedSecrets(t *testing.T) {
 	if got, want := string(config.TokenEncryptionKey), strings.Repeat("k", 32); got != want {
 		t.Errorf("TokenEncryptionKey = %q, want %q", got, want)
 	}
-	if config.WebhookSecret != "" {
-		t.Errorf("WebhookSecret = %q, want empty: global webhook secrets are not loaded", config.WebhookSecret)
+	if got, want := config.WebhookSecret, "file-webhook-secret"; got != want {
+		t.Errorf("WebhookSecret = %q, want %q", got, want)
+	}
+	if !config.LegacyHooksEnabled {
+		t.Error("LegacyHooksEnabled = false, want true when a legacy webhook secret is configured")
 	}
 }
 
@@ -59,6 +64,61 @@ func TestLoadConfigAllowsLocalHTTPGiteaOnlyInDevelopment(t *testing.T) {
 
 	if _, err := LoadConfig(); err != nil {
 		t.Fatalf("LoadConfig() error = %v, want local development HTTP URL to be accepted", err)
+	}
+}
+
+func TestLoadConfigRejectsNonExactLoopbackGiteaHost(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("GITEA_API_URL", "http://127.0.0.2:3000")
+	t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must reject non-exact loopback hosts over HTTP")
+	}
+}
+
+func TestLoadConfigEnablesOrganizationHooksByDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
+	t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
+	t.Setenv("ENABLE_ORGANIZATION_HOOKS", "")
+
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !config.EnableOrganizationHooks {
+		t.Error("EnableOrganizationHooks = false, want true by default")
+	}
+}
+
+func TestLoadConfigSupportsLegacyComposeConfiguration(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("GITEA_API_URL", "http://gitea:3000")
+	t.Setenv("WEBHOOK_SECRET", "legacy-webhook-secret")
+	t.Setenv("LEGACY_WEBHOOK_SECRET_FILE", "")
+	t.Setenv("SESSION_SECRET_FILE", "")
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("OAUTH_CLIENT_ID", "legacy-oauth-client")
+	t.Setenv("OAUTH_CLIENT_SECRET", "legacy-oauth-secret")
+	t.Setenv("OAUTH_CLIENT_SECRET_FILE", "")
+
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v, want legacy Compose configuration to start", err)
+	}
+	if got, want := config.WebhookSecret, "legacy-webhook-secret"; got != want {
+		t.Errorf("WebhookSecret = %q, want %q", got, want)
+	}
+	if !config.LegacyHooksEnabled {
+		t.Error("LegacyHooksEnabled = false, want true for legacy Compose configuration")
+	}
+	if got, want := config.OAuthClientSecret, "legacy-oauth-secret"; got != want {
+		t.Errorf("OAuthClientSecret = %q, want %q", got, want)
 	}
 }
 

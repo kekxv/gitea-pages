@@ -8,6 +8,7 @@ services:
     environment:
       # Required: your domain (e.g., example.com)
       - DOMAIN=${DOMAIN:-yourdomain.com}
+      - APP_ENV=${APP_ENV:-development}
       # Required: webhook secret (must match Gitea webhook secret)
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-your-webhook-secret}
 
