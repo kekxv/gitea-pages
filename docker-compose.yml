@@ -49,12 +49,20 @@ services:
     volumes:
       - pages_data:/var/www/pages:rw
       - deployer_data:/var/lib/deployer:rw
+      - ${SESSION_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_session_secret:ro
+      - ${TOKEN_ENCRYPTION_KEY_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_token_encryption_key:ro
+      - ${OAUTH_CLIENT_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_oauth_client_secret:ro
+      - ${LEGACY_WEBHOOK_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_legacy_webhook_secret:ro
       # SSH key for private repository access (optional)
       - ${GITEA_SSH_KEY_PATH:-/dev/null}:/var/www/pages/.ssh/id_rsa:ro
     environment:
       - DOMAIN=${DOMAIN:-yourdomain.com}
-      - APP_ENV=${APP_ENV:-development}
+      - APP_ENV=${APP_ENV:-production}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - LEGACY_WEBHOOK_SECRET_FILE=${LEGACY_WEBHOOK_SECRET_HOST_FILE:+/run/secrets/gitea_pages_legacy_webhook_secret}
+      - SESSION_SECRET_FILE=${SESSION_SECRET_HOST_FILE:+/run/secrets/gitea_pages_session_secret}
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      - TOKEN_ENCRYPTION_KEY_FILE=${TOKEN_ENCRYPTION_KEY_HOST_FILE:+/run/secrets/gitea_pages_token_encryption_key}
       - WEBHOOK_PORT=8080
       - PAGES_DATA_DIR=/var/www/pages
       - DEPLOYER_DATA_DIR=/var/lib/deployer
@@ -64,6 +72,7 @@ services:
       - GITEA_API_URL=${GITEA_API_URL:-}
       - GITEA_SSH_KEY_PATH=${GITEA_SSH_KEY_PATH:-}
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET_FILE=${OAUTH_CLIENT_SECRET_HOST_FILE:+/run/secrets/gitea_pages_oauth_client_secret}
       - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
       - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL:-}
       - WEBHOOK_PUBLIC_URL=${WEBHOOK_PUBLIC_URL:-}

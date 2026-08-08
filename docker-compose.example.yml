@@ -8,16 +8,21 @@ services:
     environment:
       # Required: your domain (e.g., example.com)
       - DOMAIN=${DOMAIN:-yourdomain.com}
-      - APP_ENV=${APP_ENV:-development}
+      - APP_ENV=${APP_ENV:-production}
       # Required: webhook secret (must match Gitea webhook secret)
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-your-webhook-secret}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - LEGACY_WEBHOOK_SECRET_FILE=${LEGACY_WEBHOOK_SECRET_HOST_FILE:+/run/secrets/gitea_pages_legacy_webhook_secret}
+      - SESSION_SECRET_FILE=${SESSION_SECRET_HOST_FILE:+/run/secrets/gitea_pages_session_secret}
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      - TOKEN_ENCRYPTION_KEY_FILE=${TOKEN_ENCRYPTION_KEY_HOST_FILE:+/run/secrets/gitea_pages_token_encryption_key}
 
       # Gitea API URL (internal network for API calls)
-      - GITEA_API_URL=${GITEA_API_URL:-http://gitea:3000}
+      - GITEA_API_URL=${GITEA_API_URL:-https://gitea:3000}
 
       # OAuth2 configuration (recommended for user self-authorization)
       # Create OAuth2 app in Gitea: Settings -> Applications -> OAuth2 Applications
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET_FILE=${OAUTH_CLIENT_SECRET_HOST_FILE:+/run/secrets/gitea_pages_oauth_client_secret}
       - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
       - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL:-https://pages.yourdomain.com/oauth/callback}
       - WEBHOOK_PUBLIC_URL=${WEBHOOK_PUBLIC_URL:-http://deployer:8080/webhook}
@@ -27,6 +32,10 @@ services:
       # - GITEA_ACCESS_TOKEN=${GITEA_ACCESS_TOKEN:-}
     volumes:
       - pages_data:/var/www/pages
+      - ${SESSION_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_session_secret:ro
+      - ${TOKEN_ENCRYPTION_KEY_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_token_encryption_key:ro
+      - ${OAUTH_CLIENT_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_oauth_client_secret:ro
+      - ${LEGACY_WEBHOOK_SECRET_HOST_FILE:-/dev/null}:/run/secrets/gitea_pages_legacy_webhook_secret:ro
       # Optional: SSH deploy key for private repos
       # - ./deploy-key:/var/www/pages/.ssh/id_rsa:ro
     ports:

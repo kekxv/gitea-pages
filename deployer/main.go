@@ -83,14 +83,14 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	appEnv := os.Getenv("APP_ENV")
 	giteaAPIURL := os.Getenv("GITEA_API_URL")
-	if err := validateGiteaURL(giteaAPIURL, os.Getenv("APP_ENV")); err != nil {
+	if err := validateGiteaURL(giteaAPIURL, appEnv); err != nil {
 		return nil, err
 	}
 	giteaPublicURL := os.Getenv("GITEA_PUBLIC_URL")
 	if giteaPublicURL != "" {
-		if err := validateGiteaURL(giteaPublicURL, os.Getenv("APP_ENV")); err != nil {
+		if err := validateGiteaURL(giteaPublicURL, appEnv); err != nil {
 			return nil, fmt.Errorf("invalid GITEA_PUBLIC_URL: %w", err)
 		}
 	}
@@ -117,7 +117,7 @@ func LoadConfig() (*Config, error) {
 		return nil, errors.New("TOKEN_ENCRYPTION_KEY_FILE must contain exactly 32 bytes")
 	}
 
-	oauthClientSecret, err := loadOAuthClientSecret(os.Getenv("OAUTH_CLIENT_SECRET_FILE"), os.Getenv("OAUTH_CLIENT_SECRET"))
+	oauthClientSecret, err := loadOAuthClientSecret(os.Getenv("OAUTH_CLIENT_ID"), os.Getenv("OAUTH_CLIENT_SECRET_FILE"), os.Getenv("OAUTH_CLIENT_SECRET"))
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +174,11 @@ func loadOptionalSecretFile(path, legacyValue string) ([]byte, error) {
 	return readSecretFile(path)
 }
 
-func loadOAuthClientSecret(path, legacyValue string) (string, error) {
+func loadOAuthClientSecret(clientID, path, legacyValue string) (string, error) {
 	if path == "" {
+		if clientID != "" && legacyValue == "" {
+			return "", errors.New("OAUTH_CLIENT_SECRET_FILE or OAUTH_CLIENT_SECRET is required when OAUTH_CLIENT_ID is set")
+		}
 		return legacyValue, nil
 	}
 	secret, err := readSecretFile(path)
@@ -373,7 +376,7 @@ func main() {
 	log.Printf("Gitea Pages Deployer starting on port %d", config.WebhookPort)
 	log.Printf("Domain: %s, PagesDir: %s, MaxSiteSize: %dMB", config.Domain, config.PagesDir, config.MaxSiteSizeMB)
 
-	if config.GiteaAccessToken != "" {
+	if config.GiteaAccessToken != "" && config.LegacyHooksEnabled {
 		log.Printf("Gitea API configured: %s", config.GiteaAPIURL)
 		if config.GiteaAPIURL != "" {
 			// Auto-register webhooks (legacy mode with global token)
