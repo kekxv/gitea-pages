@@ -40,58 +40,6 @@ func TestRemoveGitDir(t *testing.T) {
 	}
 }
 
-func TestCleanTargetDir(t *testing.T) {
-	// Create temp directory with some content
-	tempDir := t.TempDir()
-	targetDir := filepath.Join(tempDir, "target")
-
-	// Test: non-existent directory
-	err := CleanTargetDir(targetDir)
-	if err != nil {
-		t.Errorf("CleanTargetDir on non-existent dir should succeed: %v", err)
-	}
-
-	// Create target directory with content
-	if err := os.Mkdir(targetDir, 0755); err != nil {
-		t.Fatalf("Failed to create target dir: %v", err)
-	}
-
-	// Add some files
-	for i := 0; i < 3; i++ {
-		file := filepath.Join(targetDir, "file"+string(rune('0'+i)))
-		if err := os.WriteFile(file, []byte("test"), 0644); err != nil {
-			t.Fatalf("Failed to create file: %v", err)
-		}
-	}
-
-	// Add subdirectory
-	subDir := filepath.Join(targetDir, "subdir")
-	if err := os.Mkdir(subDir, 0755); err != nil {
-		t.Fatalf("Failed to create subdir: %v", err)
-	}
-
-	// Test: clean existing directory
-	err = CleanTargetDir(targetDir)
-	if err != nil {
-		t.Errorf("CleanTargetDir failed: %v", err)
-	}
-
-	// Verify content is removed
-	entries, err := os.ReadDir(targetDir)
-	if err != nil {
-		t.Fatalf("Failed to read target dir: %v", err)
-	}
-
-	if len(entries) != 0 {
-		t.Errorf("Target directory should be empty, got %d entries", len(entries))
-	}
-
-	// Verify directory itself still exists
-	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
-		t.Errorf("Target directory should still exist")
-	}
-}
-
 func TestNewGitOperations(t *testing.T) {
 	config := &Config{
 		PagesDir:      "/var/www/pages",
@@ -144,7 +92,7 @@ func TestCalculateDirSize(t *testing.T) {
 
 	// Create files
 	os.WriteFile(file1, []byte("12345"), 0644) // 5 bytes
-	os.WriteFile(file2, []byte("789"), 0644)    // 3 bytes
+	os.WriteFile(file2, []byte("789"), 0644)   // 3 bytes
 	os.Mkdir(subDir, 0755)
 	os.WriteFile(file3, []byte("abcdef"), 0644) // 6 bytes
 

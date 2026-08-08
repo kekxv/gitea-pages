@@ -34,10 +34,10 @@ type GiteaWebhookPayload struct {
 		Private  bool   `json:"private"`
 	} `json:"repository"`
 	Pusher struct {
-		ID       int64  `json:"id"`
-		Login    string `json:"login"`
-		Name     string `json:"name"`
-		Email    string `json:"email"`
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
 	} `json:"pusher"`
 	Commits []struct {
 		ID      string `json:"id"`
@@ -221,15 +221,21 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate target path
-	targetPath := CalculateTargetPath(
+	// Construct the only path representation destructive deployment accepts.
+	// Canonical repository verification is wired by the later DeploymentService.
+	target, err := NewSiteTarget(
 		d.config.PagesDir,
 		payload.Repository.Owner.Username,
 		payload.Repository.Name,
 		d.config.Domain,
 	)
+	if err != nil {
+		log.Printf("Rejected unsafe deployment target: %v", err)
+		http.Error(w, "Invalid repository path", http.StatusBadRequest)
+		return
+	}
 
-	log.Printf("Deploying to: %s", targetPath)
+	log.Printf("Deploying to: %s", target.Path())
 
 	// Extract user info from Authorization header (set during webhook registration)
 	// This solves the issue where org repos have Owner.Username = org name, not user name
@@ -277,16 +283,16 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Perform deployment with pre-clone size check and private repo auth
-	if err := d.gitOps.DeployWithToken(payload.Repository.CloneURL, targetPath,
+	if err := d.gitOps.DeployWithToken(payload.Repository.CloneURL, target,
 		payload.Repository.Owner.Username, payload.Repository.Name, userToken); err != nil {
 		log.Printf("Deployment failed: %v", err)
 		http.Error(w, fmt.Sprintf("Deployment failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("Successfully deployed %s to %s", payload.Repository.Name, targetPath)
+	log.Printf("Successfully deployed %s to %s", payload.Repository.Name, target.Path())
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Deployed successfully to %s\n", targetPath)
+	fmt.Fprintf(w, "Deployed successfully to %s\n", target.Path())
 }
 
 // HandleDelete processes Gitea delete webhook (branch/tag deletion)
@@ -326,16 +332,20 @@ func (d *Deployer) HandleDelete(w http.ResponseWriter, r *http.Request, body []b
 
 // handleBranchDelete removes the deployed site
 func (d *Deployer) handleBranchDelete(username, repoName string) {
-	targetPath := CalculateTargetPath(
+	target, err := NewSiteTarget(
 		d.config.PagesDir,
 		username,
 		repoName,
 		d.config.Domain,
 	)
+	if err != nil {
+		log.Printf("Rejected unsafe site removal target: %v", err)
+		return
+	}
 
-	log.Printf("Removing site at: %s", targetPath)
+	log.Printf("Removing site at: %s", target.Path())
 
-	if err := d.gitOps.RemoveSite(targetPath); err != nil {
+	if err := d.gitOps.RemoveSite(target); err != nil {
 		log.Printf("Failed to remove site: %v", err)
 	} else {
 		log.Printf("Successfully removed site for %s/%s", username, repoName)
@@ -358,29 +368,6 @@ func VerifySignature(body []byte, signature, secret string) bool {
 // IsGhPagesBranch checks if ref is gh-pages branch
 func IsGhPagesBranch(ref string) bool {
 	return ref == "refs/heads/gh-pages"
-}
-
-// CalculateTargetPath determines where to deploy files
-// Root site: repoName starts with "username.pages." (GitHub-style: username.github.io)
-//   -> /pagesDir/username/_root
-// Sub site: other repos -> /pagesDir/username/repoName
-// Note: username is normalized to lowercase for domain compatibility
-func CalculateTargetPath(pagesDir, username, repoName, domain string) string {
-	// Normalize username to lowercase (domains are case-insensitive)
-	normalizedUsername := strings.ToLower(username)
-	sUsername := SanitizePathComponent(normalizedUsername)
-	sRepoName := SanitizePathComponent(repoName)
-
-	// Check if this is a root site (GitHub-style: username.github.io)
-	// Format: username.pages.<anything> or username.pages.<domain>
-	pagesPrefix := fmt.Sprintf("%s.pages.", normalizedUsername)
-	isRootSite := strings.HasPrefix(strings.ToLower(repoName), pagesPrefix)
-
-	if isRootSite {
-		return fmt.Sprintf("%s/%s/_root", pagesDir, sUsername)
-	}
-
-	return fmt.Sprintf("%s/%s/%s", pagesDir, sUsername, sRepoName)
 }
 
 // readBody reads request body safely with size limit

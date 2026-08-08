@@ -98,10 +98,10 @@ func TestValidatePath(t *testing.T) {
 	}{
 		{"/var/www/pages/user/repo", false},
 		{"/var/www/pages/user/repo/file.txt", false},
-		{"/etc/passwd", true},                        // outside allowed path
+		{"/etc/passwd", true},                          // outside allowed path
 		{"/var/www/pages/user/../../etc/passwd", true}, // path traversal
-		{"/var/www/pages/../pages/user", false},       // technically inside but cleaned
-		{"/var/www/pages/user\x00/repo", true},       // null byte
+		{"/var/www/pages/../pages/user", false},        // technically inside but cleaned
+		{"/var/www/pages/user\x00/repo", true},         // null byte
 	}
 
 	for _, tt := range tests {
@@ -112,30 +112,6 @@ func TestValidatePath(t *testing.T) {
 			}
 			if !tt.hasError && err != nil {
 				t.Errorf("ValidatePath(%s) should not return error: %v", tt.path, err)
-			}
-		})
-	}
-}
-
-func TestSanitizePathComponent(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"user123", "user123"},
-		{"user/../admin", "useradmin"},
-		{"repo.git", "repo.git"},
-		{"  spaces  ", "spaces"},
-		{"special!@#$%^&*()chars", "specialchars"},
-		{"..", ""},
-		{".../", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := SanitizePathComponent(tt.input)
-			if result != tt.expected {
-				t.Errorf("SanitizePathComponent(%s) = %v, expected %v", tt.input, result, tt.expected)
 			}
 		})
 	}

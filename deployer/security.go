@@ -31,7 +31,7 @@ func SetSecurePermissions(rootPath string) error {
 
 		// Remove execute permission from files for security
 		return os.Chmod(path, newMode)
-	} )
+	})
 }
 
 // DetectSymlinks scans directory for symlinks and returns list of them
@@ -48,7 +48,7 @@ func DetectSymlinks(rootPath string) ([]string, error) {
 		}
 
 		return nil
-	} )
+	})
 
 	return symlinks, err
 }
@@ -82,22 +82,6 @@ func ValidatePath(path string, pagesDir string) error {
 	}
 
 	return nil
-}
-
-// SanitizePathComponent removes dangerous characters from path components (usernames, repo names)
-func SanitizePathComponent(name string) string {
-	// Only allow alphanumeric, hyphens, underscores and dots
-	reg := regexp.MustCompile(`[^a-zA-Z0-9\-\_\.]`)
-	sanitized := reg.ReplaceAllString(name, "")
-
-	// Remove path traversal attempts
-	sanitized = strings.ReplaceAll(sanitized, "..", "")
-	
-	// Remove leading/trailing dots and spaces
-	sanitized = strings.TrimSpace(sanitized)
-	sanitized = strings.Trim(sanitized, ".")
-
-	return sanitized
 }
 
 // gitTokenRegex masks tokens in git URLs (e.g., https://TOKEN@host/ -> https://***@host/)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -35,8 +36,27 @@ func NewGitOperations(config *Config) *GitOperations {
 	}
 }
 
-// Deploy clones repository and copies files to target path
-func (g *GitOperations) Deploy(cloneURL, targetPath string, owner, repo string) error {
+// Deploy clones a verified repository into its validated target.
+func (g *GitOperations) Deploy(ctx context.Context, repo VerifiedRepository, target SiteTarget) error {
+	if repo.CloneURL == nil {
+		return fmt.Errorf("verified repository clone URL is required")
+	}
+	return g.deploy(ctx, repo.CloneURL.String(), target, repo.Owner, repo.Name, repo.AccessToken)
+}
+
+// DeployWithToken is retained until DeploymentService replaces legacy webhook
+// wiring. It accepts SiteTarget so it cannot introduce a raw destructive path.
+func (g *GitOperations) DeployWithToken(cloneURL string, target SiteTarget, owner, repo string, userToken string) error {
+	return g.deploy(context.Background(), cloneURL, target, owner, repo, userToken)
+}
+
+func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target SiteTarget, owner, repo, userToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := g.validateTarget(target); err != nil {
+		return err
+	}
 	// Pre-clone size check via Gitea API
 	if g.giteaClient != nil {
 		maxSizeBytes := g.maxSiteSizeMB * 1024 * 1024
@@ -46,7 +66,11 @@ func (g *GitOperations) Deploy(cloneURL, targetPath string, owner, repo string) 
 	}
 
 	// Prepare authenticated clone URL
-	authCloneURL, err := PrepareCloneURL(cloneURL, g.accessToken, g.sshKeyPath)
+	token := userToken
+	if token == "" {
+		token = g.accessToken
+	}
+	authCloneURL, err := PrepareCloneURL(cloneURL, token, g.sshKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to prepare clone URL: %w", err)
 	}
@@ -87,112 +111,27 @@ func (g *GitOperations) Deploy(cloneURL, targetPath string, owner, repo string) 
 	}
 	log.Printf("Site size: %d MB (limit: %d MB)", sizeBytes/1024/1024, g.maxSiteSizeMB)
 
-	// Security: Validate target path
-	if err := ValidatePath(targetPath, g.pagesDir); err != nil {
-		return fmt.Errorf("invalid target path: %w", err)
-	}
-
-	// Ensure target directory parent exists
-	parentDir := filepath.Dir(targetPath)
+	// Staging is created beside the target so replacement remains on one
+	// filesystem and never exposes a partially copied site.
+	parentDir := filepath.Dir(target.Path())
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return fmt.Errorf("failed to create parent dir: %w", err)
 	}
-
-	// Clean existing target directory if exists
-	if err := CleanTargetDir(targetPath); err != nil {
-		return fmt.Errorf("failed to clean target dir: %w", err)
+	if err := g.validateTarget(target); err != nil {
+		return err
 	}
-
-	// Copy files from temp to target
-	if err := g.copyFiles(tempDir, targetPath); err != nil {
+	staging, err := os.MkdirTemp(parentDir, ".staging-")
+	if err != nil {
+		return fmt.Errorf("create deployment staging directory: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	if err := g.copyFiles(tempDir, staging); err != nil {
 		return fmt.Errorf("failed to copy files: %w", err)
 	}
-
-	// Set secure permissions on target files
-	if err := SetSecurePermissions(targetPath); err != nil {
+	if err := SetSecurePermissions(staging); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
-
-	return nil
-}
-
-// DeployWithToken clones repository with a specific user token (for OAuth)
-func (g *GitOperations) DeployWithToken(cloneURL, targetPath string, owner, repo string, userToken string) error {
-	// Determine which token to use
-	token := userToken
-	if token == "" {
-		token = g.accessToken // Fall back to global token
-	}
-
-	// Prepare authenticated clone URL
-	authCloneURL, err := PrepareCloneURL(cloneURL, token, g.sshKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to prepare clone URL: %w", err)
-	}
-
-	// Setup SSH key if configured
-	if g.sshKeyPath != "" {
-		if err := SetupSSHKey(g.sshKeyPath); err != nil {
-			return fmt.Errorf("failed to setup SSH key: %w", err)
-		}
-	}
-
-	// Create temp directory for cloning
-	tempDir, err := os.MkdirTemp("", "gitea-pages-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp dir: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Clone repository with shallow clone
-	if err := g.cloneRepo(authCloneURL, tempDir, g.sshKeyPath); err != nil {
-		return fmt.Errorf("failed to clone: %w", err)
-	}
-
-	// Remove .git directory from cloned repo
-	gitDir := filepath.Join(tempDir, ".git")
-	if err := RemoveGitDir(gitDir); err != nil {
-		log.Printf("Warning: failed to remove .git dir: %v", err)
-	}
-
-	// Security: Check site size before deployment
-	sizeBytes, err := CalculateDirSize(tempDir)
-	if err != nil {
-		return fmt.Errorf("failed to calculate size: %w", err)
-	}
-	maxSizeBytes := g.maxSiteSizeMB * 1024 * 1024
-	if sizeBytes > maxSizeBytes {
-		return fmt.Errorf("site size %d MB exceeds maximum allowed %d MB", sizeBytes/1024/1024, g.maxSiteSizeMB)
-	}
-	log.Printf("Site size: %d MB (limit: %d MB)", sizeBytes/1024/1024, g.maxSiteSizeMB)
-
-	// Security: Validate target path
-	if err := ValidatePath(targetPath, g.pagesDir); err != nil {
-		return fmt.Errorf("invalid target path: %w", err)
-	}
-
-	// Ensure target directory parent exists
-	parentDir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(parentDir, 0755); err != nil {
-		return fmt.Errorf("failed to create parent dir: %w", err)
-	}
-
-	// Clean existing target directory if exists
-	if err := CleanTargetDir(targetPath); err != nil {
-		return fmt.Errorf("failed to clean target dir: %w", err)
-	}
-
-	// Copy files from temp to target
-	if err := g.copyFiles(tempDir, targetPath); err != nil {
-		return fmt.Errorf("failed to copy files: %w", err)
-	}
-
-	// Set secure permissions on target files
-	if err := SetSecurePermissions(targetPath); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
-	}
-
-	return nil
+	return replaceSiteAtomically(staging, target)
 }
 
 // cloneRepo performs a shallow clone of the repository
@@ -307,25 +246,61 @@ func RemoveGitDir(gitDir string) error {
 	return os.RemoveAll(gitDir)
 }
 
-// CleanTargetDir removes existing target directory contents
-func CleanTargetDir(targetPath string) error {
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		return nil // Directory doesn't exist, nothing to clean
-	}
-
-	// Remove contents but keep directory for atomic replacement
-	entries, err := os.ReadDir(targetPath)
+func (g *GitOperations) validateTarget(target SiteTarget) error {
+	pagesRoot, err := filepath.Abs(g.pagesDir)
 	if err != nil {
+		return fmt.Errorf("resolve pages root: %w", err)
+	}
+	if target.root == "" || target.root != pagesRoot {
+		return fmt.Errorf("site target: %w", ErrUnsafeSiteTarget)
+	}
+	return target.validateExistingPath()
+}
+
+func replaceSiteAtomically(staging string, target SiteTarget) error {
+	if err := target.validateExistingPath(); err != nil {
 		return err
 	}
-
-	for _, entry := range entries {
-		path := filepath.Join(targetPath, entry.Name())
-		if err := os.RemoveAll(path); err != nil {
-			return err
-		}
+	parent := filepath.Dir(target.Path())
+	stagingAbs, err := filepath.Abs(staging)
+	if err != nil {
+		return fmt.Errorf("resolve deployment staging directory: %w", err)
+	}
+	if filepath.Dir(stagingAbs) != parent {
+		return fmt.Errorf("staging directory: %w", ErrUnsafeSiteTarget)
+	}
+	stagingInfo, err := os.Lstat(stagingAbs)
+	if err != nil {
+		return fmt.Errorf("inspect deployment staging directory: %w", err)
+	}
+	if !stagingInfo.IsDir() || stagingInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("staging directory: %w", ErrUnsafeSiteTarget)
 	}
 
+	if _, err := os.Lstat(target.Path()); os.IsNotExist(err) {
+		return os.Rename(stagingAbs, target.Path())
+	} else if err != nil {
+		return err
+	}
+	backup, err := os.MkdirTemp(parent, ".previous-")
+	if err != nil {
+		return fmt.Errorf("create previous-site path: %w", err)
+	}
+	if err := os.Remove(backup); err != nil {
+		return fmt.Errorf("prepare previous-site path: %w", err)
+	}
+	if err := os.Rename(target.Path(), backup); err != nil {
+		return fmt.Errorf("move previous site: %w", err)
+	}
+	if err := os.Rename(stagingAbs, target.Path()); err != nil {
+		if restoreErr := os.Rename(backup, target.Path()); restoreErr != nil {
+			return fmt.Errorf("install replacement: %w (restore previous site: %v)", err, restoreErr)
+		}
+		return fmt.Errorf("install replacement: %w", err)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("remove previous site: %w", err)
+	}
 	return nil
 }
 
@@ -353,18 +328,15 @@ func CalculateDirSize(dirPath string) (int64, error) {
 	return totalSize, err
 }
 
-// RemoveSite removes a deployed site directory
-func (g *GitOperations) RemoveSite(targetPath string) error {
-	// Check if path exists
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+// RemoveSite removes one validated deployed site directory.
+func (g *GitOperations) RemoveSite(target SiteTarget) error {
+	if err := g.validateTarget(target); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(target.Path()); os.IsNotExist(err) {
 		return nil // Directory doesn't exist, nothing to remove
+	} else if err != nil {
+		return err
 	}
-
-	// Security: Verify the path is within pages directory
-	if err := ValidatePath(targetPath, g.pagesDir); err != nil {
-		return fmt.Errorf("unsafe path detected: %w", err)
-	}
-
-	// Remove the entire directory
-	return os.RemoveAll(targetPath)
+	return os.RemoveAll(target.Path())
 }
