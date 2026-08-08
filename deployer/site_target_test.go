@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +117,30 @@ func TestNewSiteTargetRejectsSymlinkedPagesRoot(t *testing.T) {
 	}
 }
 
+func TestNewSiteTargetRejectsPagesRootWithSymlinkedAncestor(t *testing.T) {
+	base := t.TempDir()
+	physicalParent := filepath.Join(base, "physical")
+	pagesRoot := filepath.Join(physicalParent, "pages")
+	if err := os.MkdirAll(pagesRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(physicalParent, alias); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(pagesRoot, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewSiteTarget(filepath.Join(alias, "pages"), "alice", "site", "example.com"); err == nil {
+		t.Fatal("pages root beneath a symlinked ancestor was accepted")
+	}
+	if contents, err := os.ReadFile(sentinel); err != nil || string(contents) != "keep" {
+		t.Fatalf("pages root sentinel changed: %q, %v", contents, err)
+	}
+}
+
 func TestRemoveSiteDeletesOnlyItsValidatedTarget(t *testing.T) {
 	root := t.TempDir()
 	target, err := NewSiteTarget(root, "alice", "site", "example.com")
@@ -220,5 +245,44 @@ func TestAtomicReplaceReplacesOnlyTheValidatedTarget(t *testing.T) {
 	}
 	if contents, err := os.ReadFile(filepath.Join(root, "pages-root-sentinel")); err != nil || string(contents) != "keep" {
 		t.Fatalf("pages root sentinel changed: %q, %v", contents, err)
+	}
+}
+
+func TestAtomicReplaceRestoresExistingSiteWhenInstallFails(t *testing.T) {
+	root := t.TempDir()
+	target, err := NewSiteTarget(root, "alice", "site", "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target.Path(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target.Path(), "old.html"), []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(target.Path()), ".staging-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "index.html"), []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	renameCalls := 0
+	err = replaceSiteAtomicallyWithRename(staging, target, func(oldPath, newPath string) error {
+		renameCalls++
+		if renameCalls == 2 {
+			return errors.New("injected install failure")
+		}
+		return os.Rename(oldPath, newPath)
+	})
+	if err == nil {
+		t.Fatal("replacement unexpectedly succeeded")
+	}
+	if contents, err := os.ReadFile(filepath.Join(target.Path(), "old.html")); err != nil || string(contents) != "old" {
+		t.Fatalf("previous site was not restored: %q, %v", contents, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(staging, "index.html")); err != nil || string(contents) != "new" {
+		t.Fatalf("staging site changed after failed install: %q, %v", contents, err)
 	}
 }

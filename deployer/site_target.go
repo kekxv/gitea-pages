@@ -78,7 +78,10 @@ func NewSiteTarget(root, owner, repo, domain string) (SiteTarget, error) {
 }
 
 func (t SiteTarget) validateExistingPath() error {
-	for _, path := range []string{t.root, filepath.Join(t.root, t.owner), t.path} {
+	if err := rejectSymlinkedAncestors(t.root); err != nil {
+		return err
+	}
+	for _, path := range []string{filepath.Join(t.root, t.owner), t.path} {
 		info, err := os.Lstat(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -88,6 +91,29 @@ func (t SiteTarget) validateExistingPath() error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("site target %q: %w", path, ErrUnsafeSiteTarget)
+		}
+	}
+	return nil
+}
+
+func rejectSymlinkedAncestors(path string) error {
+	var ancestors []string
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		ancestors = append(ancestors, current)
+		if parent := filepath.Dir(current); parent == current {
+			break
+		}
+	}
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		info, err := os.Lstat(ancestors[i])
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect pages root ancestor: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("pages root ancestor %q: %w", ancestors[i], ErrUnsafeSiteTarget)
 		}
 	}
 	return nil

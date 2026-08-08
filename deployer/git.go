@@ -258,6 +258,10 @@ func (g *GitOperations) validateTarget(target SiteTarget) error {
 }
 
 func replaceSiteAtomically(staging string, target SiteTarget) error {
+	return replaceSiteAtomicallyWithRename(staging, target, os.Rename)
+}
+
+func replaceSiteAtomicallyWithRename(staging string, target SiteTarget, rename func(string, string) error) error {
 	if err := target.validateExistingPath(); err != nil {
 		return err
 	}
@@ -278,7 +282,7 @@ func replaceSiteAtomically(staging string, target SiteTarget) error {
 	}
 
 	if _, err := os.Lstat(target.Path()); os.IsNotExist(err) {
-		return os.Rename(stagingAbs, target.Path())
+		return rename(stagingAbs, target.Path())
 	} else if err != nil {
 		return err
 	}
@@ -289,11 +293,11 @@ func replaceSiteAtomically(staging string, target SiteTarget) error {
 	if err := os.Remove(backup); err != nil {
 		return fmt.Errorf("prepare previous-site path: %w", err)
 	}
-	if err := os.Rename(target.Path(), backup); err != nil {
+	if err := rename(target.Path(), backup); err != nil {
 		return fmt.Errorf("move previous site: %w", err)
 	}
-	if err := os.Rename(stagingAbs, target.Path()); err != nil {
-		if restoreErr := os.Rename(backup, target.Path()); restoreErr != nil {
+	if err := rename(stagingAbs, target.Path()); err != nil {
+		if restoreErr := rename(backup, target.Path()); restoreErr != nil {
 			return fmt.Errorf("install replacement: %w (restore previous site: %v)", err, restoreErr)
 		}
 		return fmt.Errorf("install replacement: %w", err)
