@@ -4,20 +4,20 @@
 # Build stage
 FROM golang:1.26-alpine AS builder
 
-# Install build dependencies for sqlite3
-RUN apk add --no-cache gcc musl-dev
-
 WORKDIR /build
+
+# Allow restricted build environments to select an approved Go module proxy.
+ARG GOPROXY=https://proxy.golang.org,direct
 
 # Copy go.mod and go.sum first for dependency caching
 COPY go.mod go.sum ./
-RUN go mod download
+RUN GOPROXY=${GOPROXY} go mod download
 
 # Copy source files
 COPY *.go ./
 
-# Build binary with static linking for sqlite3
-RUN CGO_ENABLED=1 go build -ldflags="-s -w -extldflags '-static'" -o deployer .
+# Build a pure-Go binary; the SQLite driver does not require CGO.
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o deployer .
 
 # Final stage
 FROM alpine:3.21

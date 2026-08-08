@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // TokenStore stores user tokens with SQLite persistence
@@ -55,11 +55,10 @@ func NewTokenStore(dataDir string) *TokenStore {
 
 // initDB initializes the SQLite database
 func (s *TokenStore) initDB() error {
-	// Use SQLite connection string with busy_timeout to avoid blocking
-	// _busy_timeout=5000 means wait up to 5 seconds if database is locked
-	dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL", s.dbPath)
+	// Configure the pure-Go SQLite driver to wait briefly for locks and use WAL.
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", s.dbPath)
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
