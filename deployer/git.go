@@ -146,13 +146,13 @@ func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target Site
 
 	// Staging is created beside the target so replacement remains on one
 	// filesystem and never exposes a partially copied site.
-	parentDir := filepath.Dir(target.Path())
-	if err := os.MkdirAll(parentDir, 0755); err != nil {
-		return fmt.Errorf("failed to create parent dir: %w", err)
-	}
 	if err := g.validateTarget(target); err != nil {
 		return err
 	}
+	if err := ensureSecurePublicationParent(target); err != nil {
+		return fmt.Errorf("secure deployment parent: %w", err)
+	}
+	parentDir := filepath.Dir(target.Path())
 	staging, err := os.MkdirTemp(parentDir, ".staging-")
 	if err != nil {
 		return fmt.Errorf("create deployment staging directory: %w", err)

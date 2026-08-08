@@ -288,6 +288,51 @@ func TestAtomicReplaceReplacesOnlyTheValidatedTarget(t *testing.T) {
 	}
 }
 
+// This would fail if a group- or world-writable Pages root or owner directory
+// could be changed between validation and the name exchange.
+func TestAtomicReplaceRejectsWritablePublicationDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		makeWritable func(root string, target SiteTarget) error
+	}{
+		{
+			name: "pages root",
+			makeWritable: func(root string, _ SiteTarget) error {
+				return os.Chmod(root, 0777)
+			},
+		},
+		{
+			name: "owner directory",
+			makeWritable: func(_ string, target SiteTarget) error {
+				return os.Chmod(filepath.Dir(target.Path()), 0777)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			target, err := NewSiteTarget(root, "alice", "site", "example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(target.Path(), 0755); err != nil {
+				t.Fatal(err)
+			}
+			staging, err := os.MkdirTemp(filepath.Dir(target.Path()), ".staging-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.makeWritable(root, target); err != nil {
+				t.Fatal(err)
+			}
+
+			err = replaceSiteAtomically(staging, target)
+			if !errors.Is(err, ErrUnsafeSiteTarget) {
+				t.Fatalf("expected unsafe publication directory rejection, got %v", err)
+			}
+		})
+	}
+}
+
 // This would fail if an existing target were first moved aside before the new
 // site is published: a failed exchange must leave both paths unchanged.
 func TestAtomicReplaceLeavesLiveSiteUntouchedWhenExchangeFails(t *testing.T) {
@@ -310,7 +355,7 @@ func TestAtomicReplaceLeavesLiveSiteUntouchedWhenExchangeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = replaceSiteAtomicallyWithExchange(staging, target, func(_, _ string) error {
+	err = replaceSiteAtomicallyWithExchange(staging, target, func(_ int, _, _ string) error {
 		return errors.New("injected exchange failure")
 	})
 	if err == nil {
