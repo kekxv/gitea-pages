@@ -201,6 +201,46 @@ func TestRemoveSiteRefusesAnAncestorChangedToASymlink(t *testing.T) {
 	}
 }
 
+func TestRemoveSiteRefusesPagesRootAncestorChangedToASymlink(t *testing.T) {
+	base := t.TempDir()
+	physicalParent := filepath.Join(base, "physical")
+	pagesRoot := filepath.Join(physicalParent, "pages")
+	target, err := NewSiteTarget(pagesRoot, "alice", "site", "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target.Path(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target.Path(), "index.html"), []byte("site"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pagesRoot, "pages-root-sentinel"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	movedParent := filepath.Join(base, "moved-physical")
+	if err := os.Rename(physicalParent, movedParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(movedParent, physicalParent); err != nil {
+		t.Fatal(err)
+	}
+
+	gitOps := &GitOperations{pagesDir: pagesRoot}
+	if err := gitOps.RemoveSite(target); err == nil {
+		t.Fatal("RemoveSite accepted a Pages root with a symlinked ancestor")
+	}
+	for path, want := range map[string]string{
+		filepath.Join(movedParent, "pages", "alice", "site", "index.html"): "site",
+		filepath.Join(movedParent, "pages", "pages-root-sentinel"):         "keep",
+	} {
+		if contents, err := os.ReadFile(path); err != nil || string(contents) != want {
+			t.Fatalf("preserved content %q = %q, %v; want %q", path, contents, err, want)
+		}
+	}
+}
+
 func TestRemoveSiteRefusesTargetFromAnotherPagesRoot(t *testing.T) {
 	target, err := NewSiteTarget(t.TempDir(), "alice", "site", "example.com")
 	if err != nil {
