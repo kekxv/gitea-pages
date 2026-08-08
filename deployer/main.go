@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -12,58 +16,235 @@ import (
 
 // Config holds application configuration from environment variables
 type Config struct {
-	Domain           string
-	WebhookSecret    string
-	WebhookPort      int
-	PagesDir         string
-	DataDir          string // Directory for persistent data (tokens.db, etc.)
-	EnableHTTPS      bool
-	MaxSiteSizeMB    int64
-	GiteaAccessToken string
-	GiteaAPIURL      string
-	GiteaSSHKeyPath  string
+	Domain                  string
+	WebhookPort             int
+	PagesDir                string
+	DataDir                 string // Directory for persistent data (tokens.db, etc.)
+	GiteaAPIURL             string
+	GiteaPublicURL          string
+	OAuthClientID           string
+	OAuthClientSecret       string
+	OAuthRedirectURL        string
+	WebhookPublicURL        string // URL that Gitea can reach for webhooks
+	SessionSecret           []byte
+	TokenEncryptionKey      []byte
+	CloneTimeout            time.Duration
+	AcquireTimeout          time.Duration
+	MaxConcurrentDeploys    int
+	MaxSiteSizeMB           int64
+	MaxRepositorySizeMB     int64
+	EnableOrganizationHooks bool
 
-	// OAuth2 configuration
-	OAuthClientID     string
-	OAuthClientSecret string
-	OAuthRedirectURL  string
-	WebhookPublicURL  string // URL that Gitea can reach for webhooks
-	GiteaPublicURL    string // URL that user's browser can reach Gitea
+	// Deprecated compatibility fields. LoadConfig deliberately does not fill
+	// WebhookSecret: normal server mode must not accept a global webhook secret.
+	WebhookSecret    string
+	EnableHTTPS      bool
+	GiteaAccessToken string
+	GiteaSSHKeyPath  string
 }
 
 // LoadConfig reads configuration from environment variables
 func LoadConfig() (*Config, error) {
-	port, err := strconv.Atoi(getEnvOrDefault("WEBHOOK_PORT", "8080"))
+	port, err := positiveInt("WEBHOOK_PORT", getEnvOrDefault("WEBHOOK_PORT", "8080"))
 	if err != nil {
-		return nil, fmt.Errorf("invalid WEBHOOK_PORT: %w", err)
+		return nil, err
 	}
 
-	maxSizeMB, err := strconv.ParseInt(getEnvOrDefault("MAX_SITE_SIZE_MB", "100"), 10, 64)
+	maxSizeMB, err := positiveInt64("MAX_SITE_SIZE_MB", getEnvOrDefault("MAX_SITE_SIZE_MB", "100"))
 	if err != nil {
-		return nil, fmt.Errorf("invalid MAX_SITE_SIZE_MB: %w", err)
+		return nil, err
+	}
+
+	maxRepositorySizeMB, err := positiveInt64("MAX_REPOSITORY_SIZE_MB", getEnvOrDefault("MAX_REPOSITORY_SIZE_MB", "1024"))
+	if err != nil {
+		return nil, err
+	}
+
+	maxConcurrentDeploys, err := positiveInt("MAX_CONCURRENT_DEPLOYS", getEnvOrDefault("MAX_CONCURRENT_DEPLOYS", "4"))
+	if err != nil {
+		return nil, err
+	}
+	if maxConcurrentDeploys > 32 {
+		return nil, fmt.Errorf("MAX_CONCURRENT_DEPLOYS must be between 1 and 32")
+	}
+
+	cloneTimeout, err := time.ParseDuration(getEnvOrDefault("CLONE_TIMEOUT", "1m"))
+	if err != nil || cloneTimeout < 10*time.Second || cloneTimeout > 10*time.Minute {
+		return nil, fmt.Errorf("CLONE_TIMEOUT must be between 10s and 10m")
+	}
+
+	acquireTimeout, err := time.ParseDuration(getEnvOrDefault("ACQUIRE_TIMEOUT", "30s"))
+	if err != nil || acquireTimeout <= 0 {
+		return nil, fmt.Errorf("ACQUIRE_TIMEOUT must be a positive duration")
+	}
+
+	enableOrganizationHooks, err := boolEnv("ENABLE_ORGANIZATION_HOOKS", false)
+	if err != nil {
+		return nil, err
+	}
+
+	giteaAPIURL := os.Getenv("GITEA_API_URL")
+	if err := validateGiteaURL(giteaAPIURL, os.Getenv("APP_ENV")); err != nil {
+		return nil, err
+	}
+	giteaPublicURL := os.Getenv("GITEA_PUBLIC_URL")
+	if giteaPublicURL != "" {
+		if err := validateGiteaURL(giteaPublicURL, os.Getenv("APP_ENV")); err != nil {
+			return nil, fmt.Errorf("invalid GITEA_PUBLIC_URL: %w", err)
+		}
+	}
+	if err := validateOptionalHTTPURL("OAUTH_REDIRECT_URL", os.Getenv("OAUTH_REDIRECT_URL")); err != nil {
+		return nil, err
+	}
+	if err := validateOptionalHTTPURL("WEBHOOK_PUBLIC_URL", os.Getenv("WEBHOOK_PUBLIC_URL")); err != nil {
+		return nil, err
+	}
+
+	sessionSecret, err := readSecretFile(os.Getenv("SESSION_SECRET_FILE"))
+	if err != nil {
+		return nil, fmt.Errorf("SESSION_SECRET_FILE: %w", err)
+	}
+	if len(sessionSecret) < 32 {
+		return nil, errors.New("SESSION_SECRET_FILE must contain at least 32 bytes")
+	}
+
+	tokenEncryptionKey, err := readSecretFile(os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"))
+	if err != nil {
+		return nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY_FILE: %w", err)
+	}
+	if len(tokenEncryptionKey) != 32 {
+		return nil, errors.New("TOKEN_ENCRYPTION_KEY_FILE must contain exactly 32 bytes")
+	}
+
+	oauthClientSecret, err := loadOAuthClientSecret(os.Getenv("OAUTH_CLIENT_ID"), os.Getenv("OAUTH_CLIENT_SECRET_FILE"))
+	if err != nil {
+		return nil, err
 	}
 
 	enableHTTPS := os.Getenv("ENABLE_HTTPS") == "true"
 
 	return &Config{
-		Domain:           getEnvOrDefault("DOMAIN", "yourdomain.com"),
-		WebhookSecret:    os.Getenv("WEBHOOK_SECRET"),
-		WebhookPort:      port,
-		PagesDir:         getEnvOrDefault("PAGES_DATA_DIR", "/var/www/pages"),
-		DataDir:          getEnvOrDefault("DEPLOYER_DATA_DIR", "/var/lib/deployer"),
-		EnableHTTPS:      enableHTTPS,
-		MaxSiteSizeMB:    maxSizeMB,
-		GiteaAccessToken: os.Getenv("GITEA_ACCESS_TOKEN"),
-		GiteaAPIURL:      getEnvOrDefault("GITEA_API_URL", ""),
-		GiteaSSHKeyPath:  getEnvOrDefault("GITEA_SSH_KEY_PATH", ""),
-
-		// OAuth2
-		OAuthClientID:     os.Getenv("OAUTH_CLIENT_ID"),
-		OAuthClientSecret: os.Getenv("OAUTH_CLIENT_SECRET"),
-		OAuthRedirectURL:  os.Getenv("OAUTH_REDIRECT_URL"),
-		WebhookPublicURL:  os.Getenv("WEBHOOK_PUBLIC_URL"),
-		GiteaPublicURL:    os.Getenv("GITEA_PUBLIC_URL"),
+		Domain:                  getEnvOrDefault("DOMAIN", "yourdomain.com"),
+		WebhookPort:             port,
+		PagesDir:                getEnvOrDefault("PAGES_DATA_DIR", "/var/www/pages"),
+		DataDir:                 getEnvOrDefault("DEPLOYER_DATA_DIR", "/var/lib/deployer"),
+		GiteaAPIURL:             giteaAPIURL,
+		GiteaPublicURL:          giteaPublicURL,
+		OAuthClientID:           os.Getenv("OAUTH_CLIENT_ID"),
+		OAuthClientSecret:       oauthClientSecret,
+		OAuthRedirectURL:        os.Getenv("OAUTH_REDIRECT_URL"),
+		WebhookPublicURL:        os.Getenv("WEBHOOK_PUBLIC_URL"),
+		SessionSecret:           sessionSecret,
+		TokenEncryptionKey:      tokenEncryptionKey,
+		CloneTimeout:            cloneTimeout,
+		AcquireTimeout:          acquireTimeout,
+		MaxConcurrentDeploys:    maxConcurrentDeploys,
+		MaxSiteSizeMB:           maxSizeMB,
+		MaxRepositorySizeMB:     maxRepositorySizeMB,
+		EnableOrganizationHooks: enableOrganizationHooks,
+		EnableHTTPS:             enableHTTPS,
+		GiteaAccessToken:        os.Getenv("GITEA_ACCESS_TOKEN"),
+		GiteaSSHKeyPath:         getEnvOrDefault("GITEA_SSH_KEY_PATH", ""),
 	}, nil
+}
+
+func readSecretFile(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read secret file: %w", err)
+	}
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 {
+		return nil, errors.New("secret file is empty")
+	}
+	return b, nil
+}
+
+func loadOAuthClientSecret(clientID, path string) (string, error) {
+	if path == "" {
+		if clientID != "" {
+			return "", errors.New("OAUTH_CLIENT_SECRET_FILE is required when OAUTH_CLIENT_ID is set")
+		}
+		return "", nil
+	}
+	secret, err := readSecretFile(path)
+	if err != nil {
+		return "", fmt.Errorf("OAUTH_CLIENT_SECRET_FILE: %w", err)
+	}
+	return string(secret), nil
+}
+
+func validateGiteaURL(rawURL, appEnv string) error {
+	if rawURL == "" {
+		return errors.New("GITEA_API_URL is required")
+	}
+	parsed, err := parseHTTPURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid GITEA_API_URL: %w", err)
+	}
+	if parsed.Scheme == "http" && (appEnv != "development" || !isLocalDevelopmentHost(parsed.Hostname())) {
+		return errors.New("GITEA_API_URL must use HTTPS outside local development")
+	}
+	return nil
+}
+
+func validateOptionalHTTPURL(name, rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
+	if _, err := parseHTTPURL(rawURL); err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
+	}
+	return nil
+}
+
+func parseHTTPURL(rawURL string) (*url.URL, error) {
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, errors.New("must be an absolute HTTP(S) URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("must use HTTP or HTTPS")
+	}
+	return parsed, nil
+}
+
+func isLocalDevelopmentHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return host != "" && !strings.Contains(host, ".")
+}
+
+func positiveInt(name, value string) (int, error) {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return parsed, nil
+}
+
+func positiveInt64(name, value string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return parsed, nil
+}
+
+func boolEnv(name string, defaultValue bool) (bool, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	return parsed, nil
 }
 
 func getEnvOrDefault(key, defaultVal string) string {
@@ -80,11 +261,6 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if config.WebhookSecret == "" {
-		log.Println("SECURITY ERROR: WEBHOOK_SECRET not set - webhook processing is DISABLED")
-		log.Println("Set WEBHOOK_SECRET environment variable to enable webhook processing")
-	}
-
 	// Initialize deployer
 	deployer := NewDeployer(config)
 
@@ -95,7 +271,7 @@ func main() {
 	deployer.SetTokenStore(tokenStore)
 
 	// Initialize web handler
-	webHandler := NewWebHandler(nil, tokenStore, config.Domain, config.WebhookSecret)
+	webHandler := NewWebHandler(nil, tokenStore, config.Domain, "")
 
 	// Initialize OAuth handler if configured
 	var oauthHandler *OAuthHandler
@@ -107,13 +283,13 @@ func main() {
 		}
 
 		oauthConfig := &OAuthConfig{
-			ClientID:        config.OAuthClientID,
-			ClientSecret:    config.OAuthClientSecret,
-			RedirectURL:     config.OAuthRedirectURL,
-			AuthURL:         strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
-			TokenURL:        strings.TrimSuffix(config.GiteaAPIURL, "/") + "/login/oauth/access_token",
-			APIURL:          config.GiteaAPIURL,
-			PublicAuthURL:   strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
+			ClientID:      config.OAuthClientID,
+			ClientSecret:  config.OAuthClientSecret,
+			RedirectURL:   config.OAuthRedirectURL,
+			AuthURL:       strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
+			TokenURL:      strings.TrimSuffix(config.GiteaAPIURL, "/") + "/login/oauth/access_token",
+			APIURL:        config.GiteaAPIURL,
+			PublicAuthURL: strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
 		}
 
 		// Use WebhookPublicURL if set, otherwise derive from redirect URL
@@ -133,7 +309,7 @@ func main() {
 		log.Printf("OAuth Token URL (internal): %s", oauthConfig.TokenURL)
 		log.Printf("Webhook URL for OAuth registrations: %s", webhookURL)
 
-		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, config.WebhookSecret)
+		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, "")
 		webHandler.oauthConfig = oauthConfig
 		deployer.SetOAuthHandler(oauthHandler)
 
