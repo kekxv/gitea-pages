@@ -1,382 +1,132 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"strings"
-	"time"
 )
 
-// GiteaWebhookPayload represents Gitea webhook push payload
-type GiteaWebhookPayload struct {
-	Ref        string `json:"ref"`
-	Before     string `json:"before"`
-	After      string `json:"after"`
-	Repository struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		FullName string `json:"full_name"`
-		Owner    struct {
-			ID       int64  `json:"id"`
-			Username string `json:"username"`
-			Name     string `json:"name"`
-			Email    string `json:"email"`
-		} `json:"owner"`
-		CloneURL string `json:"clone_url"`
-		HTMLURL  string `json:"html_url"`
-		Private  bool   `json:"private"`
-	} `json:"repository"`
-	Pusher struct {
-		ID    int64  `json:"id"`
-		Login string `json:"login"`
-		Name  string `json:"name"`
-		Email string `json:"email"`
-	} `json:"pusher"`
-	Commits []struct {
-		ID      string `json:"id"`
-		Message string `json:"message"`
-	} `json:"commits"`
+const deletedGitReference = "0000000000000000000000000000000000000000"
+
+// DeploymentExecutor is the deployment boundary used by the webhook handler.
+// It receives only canonical repository metadata and validated targets.
+type DeploymentExecutor interface {
+	Deploy(context.Context, VerifiedRepository, SiteTarget) error
+	Remove(context.Context, SiteTarget) error
 }
 
-// GiteaDeletePayload represents Gitea webhook branch/tag delete payload
-type GiteaDeletePayload struct {
-	Ref        string `json:"ref"`
-	RefType    string `json:"ref_type"` // "branch" or "tag"
-	Repository struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		FullName string `json:"full_name"`
-		Owner    struct {
-			ID       int64  `json:"id"`
-			Username string `json:"username"`
-		} `json:"owner"`
-	} `json:"repository"`
-	Sender struct {
-		ID    int64  `json:"id"`
-		Login string `json:"login"`
-	} `json:"sender"`
-}
-
-// Deployer handles webhook requests and deployment
+// Deployer handles authenticated webhook requests and deployment.
 type Deployer struct {
-	config       *Config
-	gitOps       *GitOperations
-	tokenStore   *TokenStore   // For OAuth user tokens
-	oauthHandler *OAuthHandler // For token refresh
+	config             *Config
+	hookStore          HookStore
+	repositoryVerifier RepositoryVerifier
+	deployments        DeploymentExecutor
 }
 
-// NewDeployer creates a new Deployer instance
-func NewDeployer(config *Config) *Deployer {
+// NewWebhookDeployer constructs the post-migration webhook handler. Its
+// dependencies are deliberately injected after secure storage is initialized.
+func NewWebhookDeployer(config *Config, hookStore HookStore, verifier RepositoryVerifier, deployments DeploymentExecutor) *Deployer {
 	return &Deployer{
-		config: config,
-		gitOps: NewGitOperations(config),
+		config:             config,
+		hookStore:          hookStore,
+		repositoryVerifier: verifier,
+		deployments:        deployments,
 	}
 }
 
-// SetTokenStore sets the token store for OAuth user tokens
-func (d *Deployer) SetTokenStore(store *TokenStore) {
-	d.tokenStore = store
-}
-
-// SetOAuthHandler sets the OAuth handler for token refresh
-func (d *Deployer) SetOAuthHandler(handler *OAuthHandler) {
-	d.oauthHandler = handler
-}
-
-// getTokenWithRefresh gets a valid access token, refreshing if expired
-// Returns the access token or empty string if unavailable
-func (d *Deployer) getTokenWithRefresh(username string) string {
-	if d.tokenStore == nil || username == "" {
-		return ""
-	}
-
-	normalizedUsername := strings.ToLower(username)
-	token := d.tokenStore.Get(normalizedUsername)
-	if token == nil {
-		return ""
-	}
-
-	// Check if token is expired
-	if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
-		log.Printf("Token for %s has expired, attempting refresh", normalizedUsername)
-
-		// Try to refresh if we have a refresh token and oauth handler
-		if token.RefreshToken != "" && d.oauthHandler != nil {
-			newToken, err := d.oauthHandler.refreshAccessToken(token.RefreshToken)
-			if err != nil {
-				log.Printf("Failed to refresh token for %s: %v", normalizedUsername, err)
-				return ""
-			}
-
-			// Update token in store
-			token.AccessToken = newToken.AccessToken
-			token.TokenType = newToken.TokenType
-			if newToken.RefreshToken != "" {
-				token.RefreshToken = newToken.RefreshToken
-			}
-			if newToken.ExpiresIn > 0 {
-				token.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
-			}
-			d.tokenStore.Set(normalizedUsername, token)
-
-			log.Printf("Token refreshed successfully for %s", normalizedUsername)
-			return token.AccessToken
-		}
-
-		log.Printf("No refresh token available for %s", normalizedUsername)
-		return ""
-	}
-
-	return token.AccessToken
-}
-
-// HandleWebhook processes Gitea push and delete webhooks
+// HandleWebhook accepts only per-hook authenticated deliveries. The payload
+// is never used to select either a credential or a clone URL.
 func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Read body
-	body, err := readBody(r)
-	if err != nil {
-		log.Printf("Error reading body: %v", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	if d == nil || d.config == nil || d.hookStore == nil || d.repositoryVerifier == nil || d.deployments == nil {
+		log.Printf("Webhook handler is not configured")
+		http.Error(w, "Webhook service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Verify signature if secret is configured
-	if d.config.WebhookSecret != "" {
-		signature := r.Header.Get("X-Gitea-Signature")
-		if !VerifySignature(body, signature, d.config.WebhookSecret) {
-			log.Printf("Invalid signature from %s", r.RemoteAddr)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	authenticated, err := AuthenticateWebhook(r.Context(), r, d.hookStore)
+	if err != nil {
+		writeWebhookError(w, err)
+		return
+	}
+	payload, err := DecodeWebhook(authenticated.Body, r.Header.Get("X-Gitea-Event"))
+	if err != nil {
+		writeWebhookError(w, err)
+		return
+	}
+	repository, err := d.repositoryVerifier.Verify(r.Context(), authenticated.Principal, payload.Repository)
+	if err != nil {
+		writeWebhookError(w, err)
+		return
+	}
+	target, err := NewSiteTarget(d.config.PagesDir, repository.Owner, repository.Name, d.config.Domain)
+	if err != nil {
+		writeWebhookError(w, err)
+		return
+	}
+
+	if !IsGhPagesBranch(payload.Ref) && !(payload.Kind == "delete" && payload.Ref == "gh-pages") {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintln(w, "Ignored: not gh-pages branch")
+		return
+	}
+
+	if payload.Kind == "delete" {
+		if payload.RefType != "branch" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintln(w, "Ignored: not a branch")
 			return
 		}
+		err = d.deployments.Remove(r.Context(), target)
+	} else if payload.After == deletedGitReference {
+		err = d.deployments.Remove(r.Context(), target)
 	} else {
-		// SECURITY: Reject webhooks without signature verification
-		// This prevents forged webhook attacks
-		log.Printf("SECURITY WARNING: Webhook rejected - no WEBHOOK_SECRET configured")
-		http.Error(w, "Webhook secret not configured", http.StatusServiceUnavailable)
-		return
+		err = d.deployments.Deploy(r.Context(), *repository, target)
 	}
-
-	// Get event type from header
-	eventType := r.Header.Get("X-Gitea-Event")
-
-	// Handle delete event
-	if eventType == "delete" {
-		d.HandleDelete(w, r, body)
-		return
-	}
-
-	// Parse push payload
-	var payload GiteaWebhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Printf("Error parsing payload: %v", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	// Log request info
-	log.Printf("Received webhook: repo=%s, ref=%s, pusher=%s",
-		payload.Repository.Name, payload.Ref, payload.Pusher.Login)
-
-	// Security: Validate clone URL to prevent token phishing
-	// SECURITY: Clone URL must be from trusted host
-	if !IsTrustedCloneURL(payload.Repository.CloneURL, d.config.GiteaAPIURL) {
-		log.Printf("Rejected untrusted clone URL: %s", SanitizeGitOutput(payload.Repository.CloneURL))
-		http.Error(w, "Untrusted clone URL", http.StatusForbidden)
-		return
-	}
-
-	// SECURITY: For private repos, require trusted API URL for clone URL verification
-	if payload.Repository.Private && d.config.GiteaAPIURL == "" {
-		log.Printf("Rejected private repo webhook - no GITEA_API_URL configured for clone URL verification")
-		http.Error(w, "Private repo requires API URL configuration", http.StatusForbidden)
-		return
-	}
-
-	// Filter branch - only process gh-pages
-	if !IsGhPagesBranch(payload.Ref) {
-		log.Printf("Ignoring non-gh-pages branch: %s", payload.Ref)
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Ignored: not gh-pages branch\n")
-		return
-	}
-
-	// Check if this is a branch deletion (After is all zeros)
-	if payload.After == "0000000000000000000000000000000000000000" {
-		log.Printf("Branch deletion detected for %s", payload.Ref)
-		d.handleBranchDelete(payload.Repository.Owner.Username, payload.Repository.Name)
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Site removed successfully\n")
-		return
-	}
-
-	// Construct the only path representation destructive deployment accepts.
-	// Canonical repository verification is wired by the later DeploymentService.
-	target, err := NewSiteTarget(
-		d.config.PagesDir,
-		payload.Repository.Owner.Username,
-		payload.Repository.Name,
-		d.config.Domain,
-	)
 	if err != nil {
-		log.Printf("Rejected unsafe deployment target: %v", err)
-		http.Error(w, "Invalid repository path", http.StatusBadRequest)
+		writeWebhookError(w, err)
 		return
 	}
-
-	log.Printf("Deploying to: %s", target.Path())
-
-	// Extract user info from Authorization header (set during webhook registration)
-	// This solves the issue where org repos have Owner.Username = org name, not user name
-	var webhookUser string
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
-		encoded := strings.TrimPrefix(authHeader, "Bearer ")
-		decoded, err := base64.StdEncoding.DecodeString(encoded)
-		if err == nil {
-			var userInfo struct {
-				Username string `json:"username"`
-			}
-			if json.Unmarshal(decoded, &userInfo) == nil && userInfo.Username != "" {
-				webhookUser = strings.ToLower(userInfo.Username)
-				log.Printf("Webhook from user: %s", webhookUser)
-			}
-		}
-	}
-
-	// Get user token for clone authentication (if OAuth is enabled)
-	// Prefer username from Authorization header (for org repos), fallback to Owner
-	// This method will attempt to refresh expired tokens
-	userToken := ""
-	if d.tokenStore != nil {
-		if webhookUser != "" {
-			userToken = d.getTokenWithRefresh(webhookUser)
-			if userToken != "" {
-				log.Printf("Using OAuth token for user: %s", webhookUser)
-			}
-		}
-		// Fallback to Owner.Username if no token found from header
-		if userToken == "" {
-			userToken = d.getTokenWithRefresh(payload.Repository.Owner.Username)
-			if userToken != "" {
-				log.Printf("Using OAuth token for owner: %s", payload.Repository.Owner.Username)
-			}
-		}
-		if userToken == "" && payload.Repository.Private {
-			if webhookUser != "" {
-				log.Printf("Warning: Private repo but no OAuth token for user: %s", webhookUser)
-			} else {
-				log.Printf("Warning: Private repo but no OAuth token for owner: %s", payload.Repository.Owner.Username)
-			}
-		}
-	}
-
-	// Perform deployment with pre-clone size check and private repo auth
-	if err := d.gitOps.DeployWithToken(payload.Repository.CloneURL, target,
-		payload.Repository.Owner.Username, payload.Repository.Name, userToken); err != nil {
-		log.Printf("Deployment failed: %v", err)
-		http.Error(w, fmt.Sprintf("Deployment failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("Successfully deployed %s to %s", payload.Repository.Name, target.Path())
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Deployed successfully to %s\n", target.Path())
-}
-
-// HandleDelete processes Gitea delete webhook (branch/tag deletion)
-func (d *Deployer) HandleDelete(w http.ResponseWriter, r *http.Request, body []byte) {
-	var payload GiteaDeletePayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Printf("Error parsing delete payload: %v", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("Received delete webhook: ref=%s, ref_type=%s, repo=%s, sender=%s",
-		payload.Ref, payload.RefType, payload.Repository.FullName, payload.Sender.Login)
-
-	// Only process branch deletions
-	if payload.RefType != "branch" {
-		log.Printf("Ignoring non-branch deletion: %s", payload.RefType)
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Ignored: not a branch\n")
-		return
-	}
-
-	// Only process gh-pages branch deletions
-	if payload.Ref != "gh-pages" {
-		log.Printf("Ignoring non-gh-pages branch deletion: %s", payload.Ref)
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Ignored: not gh-pages branch\n")
-		return
-	}
-
-	// Delete the site
-	d.handleBranchDelete(payload.Repository.Owner.Username, payload.Repository.Name)
 
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Site removed successfully\n")
-}
-
-// handleBranchDelete removes the deployed site
-func (d *Deployer) handleBranchDelete(username, repoName string) {
-	target, err := NewSiteTarget(
-		d.config.PagesDir,
-		username,
-		repoName,
-		d.config.Domain,
-	)
-	if err != nil {
-		log.Printf("Rejected unsafe site removal target: %v", err)
+	if payload.Kind == "delete" || payload.After == deletedGitReference {
+		_, _ = fmt.Fprintln(w, "Site removed successfully")
 		return
 	}
+	_, _ = fmt.Fprintln(w, "Deployed successfully")
+}
 
-	log.Printf("Removing site at: %s", target.Path())
-
-	if err := d.gitOps.RemoveSite(target); err != nil {
-		log.Printf("Failed to remove site: %v", err)
-	} else {
-		log.Printf("Successfully removed site for %s/%s", username, repoName)
+func writeWebhookError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrPayloadTooLarge):
+		http.Error(w, "Payload too large", http.StatusRequestEntityTooLarge)
+	case errors.Is(err, ErrInvalidAuthorization), errors.Is(err, ErrMissingDeliveryID),
+		errors.Is(err, ErrMissingSignature), errors.Is(err, ErrUnknownHook),
+		errors.Is(err, ErrInvalidSignature), errors.Is(err, ErrReplay):
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	case errors.Is(err, ErrUnsupportedWebhook), errors.Is(err, ErrMalformedWebhook),
+		errors.Is(err, ErrInvalidPathComponent), errors.Is(err, ErrUnsafeSiteTarget):
+		http.Error(w, "Bad request", http.StatusBadRequest)
+	case errors.Is(err, ErrRepositoryMismatch), errors.Is(err, ErrRepositoryOutOfScope),
+		errors.Is(err, ErrUntrustedCloneURL), errors.Is(err, ErrRepositoryAccess):
+		http.Error(w, "Repository forbidden", http.StatusForbidden)
+	case errors.Is(err, ErrRepositoryTooLarge):
+		http.Error(w, "Repository too large", http.StatusRequestEntityTooLarge)
+	case errors.Is(err, ErrDeploymentSaturated):
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "Deployment capacity exhausted", http.StatusTooManyRequests)
+	default:
+		log.Printf("Webhook handling failed: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}
 }
 
-// VerifySignature validates HMAC-SHA256 signature from Gitea
-func VerifySignature(body []byte, signature, secret string) bool {
-	if signature == "" {
-		return false
-	}
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	expectedMAC := hex.EncodeToString(mac.Sum(nil))
-
-	return hmac.Equal([]byte(signature), []byte(expectedMAC))
-}
-
-// IsGhPagesBranch checks if ref is gh-pages branch
+// IsGhPagesBranch identifies the deployment branch for push events.
 func IsGhPagesBranch(ref string) bool {
 	return ref == "refs/heads/gh-pages"
-}
-
-// readBody reads request body safely with size limit
-func readBody(r *http.Request) ([]byte, error) {
-	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1MB max
-	return readAll(r.Body)
-}
-
-func readAll(r io.ReadCloser) ([]byte, error) {
-	defer r.Close()
-	return io.ReadAll(r)
 }

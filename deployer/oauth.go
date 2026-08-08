@@ -1055,157 +1055,19 @@ func giteaHookError(resp *http.Response) error {
 }
 
 // registerOrgWebhook registers a webhook at organization level
-// username is used to construct the authorization_header for webhook
 func (h *OAuthHandler) registerOrgWebhook(token, org, username string) error {
-	if h.store != nil {
-		return h.registerScopedHook(token, HookPrincipal{Username: username, ScopeType: ScopeOrganization, ScopeName: org})
+	if h.store == nil {
+		return errors.New("hook credential storage is required")
 	}
-	// Construct authorization header with user info (base64 encoded JSON)
-	userInfo := map[string]string{"username": username}
-	userInfoJSON, _ := json.Marshal(userInfo)
-	authHeader := "Bearer " + base64.StdEncoding.EncodeToString(userInfoJSON)
-
-	payload := map[string]interface{}{
-		"type": "gitea",
-		"config": map[string]string{
-			"url":          h.webhookURL,
-			"content_type": "json",
-			"secret":       h.secret,
-		},
-		"events":               []string{"push", "delete"},
-		"active":               true,
-		"branch_filter":        "gh-pages",
-		"authorization_header": authHeader,
-	}
-
-	// Check if webhook already exists
-	existingID, existingHeader, err := h.checkOrgWebhookExists(token, org)
-	if err != nil {
-		log.Printf("Warning: failed to check existing org webhooks: %v", err)
-	}
-
-	if existingID > 0 {
-		// If exists with same authorization_header, skip
-		if existingHeader == authHeader {
-			log.Printf("Webhook already exists for org %s with same config, skipping", org)
-			return nil
-		}
-		// If exists but config different, update
-		log.Printf("Webhook exists for org %s with different config, updating...", org)
-		return h.updateOrgWebhook(token, org, existingID, payload)
-	}
-
-	// Create new webhook
-	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/orgs/" + org + "/hooks"
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		var errResp struct {
-			Message string `json:"message"`
-		}
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Message != "" {
-			return fmt.Errorf("%s", errResp.Message)
-		}
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	return nil
+	return h.registerScopedHook(token, HookPrincipal{Username: username, ScopeType: ScopeOrganization, ScopeName: org})
 }
 
 // registerUserWebhook registers a webhook at user level (covers all repositories)
-// username is used to construct the authorization_header for webhook
 func (h *OAuthHandler) registerUserWebhook(token, username string) error {
-	if h.store != nil {
-		return h.registerScopedHook(token, HookPrincipal{Username: username, ScopeType: ScopeUser, ScopeName: username})
+	if h.store == nil {
+		return errors.New("hook credential storage is required")
 	}
-	// Construct authorization header with user info (base64 encoded JSON)
-	userInfo := map[string]string{"username": username}
-	userInfoJSON, _ := json.Marshal(userInfo)
-	authHeader := "Bearer " + base64.StdEncoding.EncodeToString(userInfoJSON)
-
-	payload := map[string]interface{}{
-		"type": "gitea",
-		"config": map[string]string{
-			"url":          h.webhookURL,
-			"content_type": "json",
-			"secret":       h.secret,
-		},
-		"events":               []string{"push", "delete"},
-		"active":               true,
-		"branch_filter":        "gh-pages",
-		"authorization_header": authHeader,
-	}
-
-	// Check if webhook already exists
-	existingID, existingHeader, err := h.checkUserWebhookExists(token)
-	if err != nil {
-		log.Printf("Warning: failed to check existing user webhooks: %v", err)
-	}
-
-	if existingID > 0 {
-		// If exists with same authorization_header, skip
-		if existingHeader == authHeader {
-			log.Printf("Webhook already exists for user with same config, skipping")
-			return nil
-		}
-		// If exists but config different, update
-		log.Printf("Webhook exists for user with different config, updating...")
-		return h.updateUserWebhook(token, existingID, payload)
-	}
-
-	// Create new webhook
-	url := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/user/hooks"
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		var errResp struct {
-			Message string `json:"message"`
-		}
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Message != "" {
-			return fmt.Errorf("%s", errResp.Message)
-		}
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	return nil
+	return h.registerScopedHook(token, HookPrincipal{Username: username, ScopeType: ScopeUser, ScopeName: username})
 }
 
 // Session cookie constants

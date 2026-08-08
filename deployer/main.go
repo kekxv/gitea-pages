@@ -34,13 +34,7 @@ type Config struct {
 	MaxSiteSizeMB           int64
 	MaxRepositorySizeMB     int64
 	EnableOrganizationHooks bool
-	LegacyHooksEnabled      bool
-
-	// Deprecated compatibility fields. They keep hooks delivering while existing
-	// installations rotate to per-webhook secrets.
-	WebhookSecret    string
-	EnableHTTPS      bool
-	GiteaAccessToken string
+	EnableHTTPS             bool
 }
 
 // LoadConfig reads configuration from environment variables
@@ -123,11 +117,6 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	webhookSecret, legacyHooksEnabled, err := loadLegacyWebhookSecret(os.Getenv("LEGACY_WEBHOOK_SECRET_FILE"), os.Getenv("WEBHOOK_SECRET"))
-	if err != nil {
-		return nil, err
-	}
-
 	enableHTTPS := os.Getenv("ENABLE_HTTPS") == "true"
 
 	return &Config{
@@ -149,10 +138,7 @@ func LoadConfig() (*Config, error) {
 		MaxSiteSizeMB:           maxSizeMB,
 		MaxRepositorySizeMB:     maxRepositorySizeMB,
 		EnableOrganizationHooks: enableOrganizationHooks,
-		LegacyHooksEnabled:      legacyHooksEnabled,
-		WebhookSecret:           webhookSecret,
 		EnableHTTPS:             enableHTTPS,
-		GiteaAccessToken:        os.Getenv("GITEA_ACCESS_TOKEN"),
 	}, nil
 }
 
@@ -187,21 +173,6 @@ func loadOAuthClientSecret(clientID, path, legacyValue string) (string, error) {
 		return "", fmt.Errorf("OAUTH_CLIENT_SECRET_FILE: %w", err)
 	}
 	return string(secret), nil
-}
-
-func loadLegacyWebhookSecret(path, legacyValue string) (string, bool, error) {
-	if path != "" {
-		secret, err := readSecretFile(path)
-		if err != nil {
-			return "", false, fmt.Errorf("LEGACY_WEBHOOK_SECRET_FILE: %w", err)
-		}
-		return string(secret), true, nil
-	}
-	if legacyValue != "" {
-		log.Printf("DEPRECATION WARNING: WEBHOOK_SECRET is supported only during migration; use LEGACY_WEBHOOK_SECRET_FILE before rotating hooks")
-		return legacyValue, true, nil
-	}
-	return "", false, nil
 }
 
 func validateGiteaURL(rawURL, appEnv string) error {
@@ -317,17 +288,19 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Initialize deployer
-	deployer := NewDeployer(config)
-
 	// Initialize token store for OAuth with SQLite persistence
 	tokenStore, err := NewTokenStore(config.DataDir, config.TokenEncryptionKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize encrypted token store: %v", err)
 	}
 
-	// Connect token store to deployer for private repo access
-	deployer.SetTokenStore(tokenStore)
+	// Webhooks are enabled only after encrypted token and per-hook credential
+	// storage exists. There is no runtime shared-secret fallback after migration.
+	repositoryVerifier, err := NewRepositoryVerifier(config.GiteaAPIURL, tokenStore)
+	if err != nil {
+		log.Fatalf("Failed to initialize repository verifier: %v", err)
+	}
+	deployer := NewWebhookDeployer(config, tokenStore, repositoryVerifier, NewDeploymentService(config))
 
 	// Initialize web handler
 	webHandler := NewWebHandler(nil, tokenStore, config.Domain, string(config.SessionSecret))
@@ -356,8 +329,6 @@ func main() {
 
 		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, string(config.SessionSecret))
 		webHandler.oauthConfig = oauthConfig
-		deployer.SetOAuthHandler(oauthHandler)
-
 		// Start background token refresh (every 24 hours)
 		// This proactively refreshes tokens before they expire
 		oauthHandler.StartBackgroundRefresh(24)
@@ -391,13 +362,6 @@ func main() {
 	log.Printf("Gitea Pages Deployer starting on port %d", config.WebhookPort)
 	log.Printf("Domain: %s, PagesDir: %s, MaxSiteSize: %dMB", config.Domain, config.PagesDir, config.MaxSiteSizeMB)
 
-	if config.GiteaAccessToken != "" && config.LegacyHooksEnabled {
-		log.Printf("Gitea API configured: %s", config.GiteaAPIURL)
-		if config.GiteaAPIURL != "" {
-			// Auto-register webhooks (legacy mode with global token)
-			go autoRegisterWebhooks(config)
-		}
-	}
 	if config.OAuthClientID != "" {
 		log.Printf("OAuth2 enabled: %s", config.GiteaAPIURL)
 	}

@@ -15,6 +15,7 @@ var (
 	ErrUntrustedCloneURL    = errors.New("canonical repository clone URL is untrusted")
 	ErrRepositoryAccess     = errors.New("no access token for webhook principal")
 	ErrUnsupportedWebhook   = errors.New("unsupported webhook event")
+	ErrMalformedWebhook     = errors.New("malformed webhook payload")
 )
 
 // VerifiedRepository is canonical repository metadata fetched from Gitea.
@@ -42,6 +43,7 @@ type WebhookEvent struct {
 	Kind       string
 	Ref        string
 	After      string
+	RefType    string
 	Repository PayloadRepository
 }
 
@@ -125,6 +127,7 @@ func DecodeWebhook(body []byte, eventType string) (WebhookEvent, error) {
 	var payload struct {
 		Ref        string `json:"ref"`
 		After      string `json:"after"`
+		RefType    string `json:"ref_type"`
 		Repository struct {
 			ID    int64  `json:"id"`
 			Name  string `json:"name"`
@@ -134,12 +137,19 @@ func DecodeWebhook(body []byte, eventType string) (WebhookEvent, error) {
 		} `json:"repository"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return WebhookEvent{}, fmt.Errorf("decode webhook: %w", err)
+		return WebhookEvent{}, fmt.Errorf("%w: %v", ErrMalformedWebhook, err)
+	}
+	if payload.Ref == "" || payload.Repository.ID <= 0 || payload.Repository.Name == "" || payload.Repository.Owner.Username == "" {
+		return WebhookEvent{}, ErrMalformedWebhook
+	}
+	if eventType == "delete" && payload.RefType == "" {
+		return WebhookEvent{}, ErrMalformedWebhook
 	}
 	return WebhookEvent{
-		Kind:  eventType,
-		Ref:   payload.Ref,
-		After: payload.After,
+		Kind:    eventType,
+		Ref:     payload.Ref,
+		After:   payload.After,
+		RefType: payload.RefType,
 		Repository: PayloadRepository{
 			ID:            payload.Repository.ID,
 			Name:          payload.Repository.Name,

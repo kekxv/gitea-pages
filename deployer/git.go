@@ -73,24 +73,15 @@ type GitOperations struct {
 	maxSiteSizeMB int64
 	cloneTimeout  time.Duration
 	gitBinary     string
-	accessToken   string
-	giteaClient   *GiteaClient
 }
 
 // NewGitOperations creates a new GitOperations instance
 func NewGitOperations(config *Config) *GitOperations {
-	var giteaClient *GiteaClient
-	if config.GiteaAPIURL != "" && config.GiteaAccessToken != "" {
-		giteaClient = NewGiteaClient(config.GiteaAPIURL, config.GiteaAccessToken)
-	}
-
 	return &GitOperations{
 		pagesDir:      config.PagesDir,
 		maxSiteSizeMB: config.MaxSiteSizeMB,
 		cloneTimeout:  config.CloneTimeout,
 		gitBinary:     "git",
-		accessToken:   config.GiteaAccessToken,
-		giteaClient:   giteaClient,
 	}
 }
 
@@ -99,37 +90,16 @@ func (g *GitOperations) Deploy(ctx context.Context, repo VerifiedRepository, tar
 	if repo.CloneURL == nil {
 		return fmt.Errorf("verified repository clone URL is required")
 	}
-	return g.deploy(ctx, repo.CloneURL.String(), target, repo.Owner, repo.Name, repo.AccessToken)
+	return g.deploy(ctx, repo.CloneURL, target, repo.AccessToken)
 }
 
-// DeployWithToken is retained until DeploymentService replaces legacy webhook
-// wiring. It accepts SiteTarget so it cannot introduce a raw destructive path.
-func (g *GitOperations) DeployWithToken(cloneURL string, target SiteTarget, owner, repo string, userToken string) error {
-	ctx := context.Background()
-	if g.cloneTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, g.cloneTimeout)
-		defer cancel()
-	}
-	return g.deploy(ctx, cloneURL, target, owner, repo, userToken)
-}
-
-func (g *GitOperations) deploy(ctx context.Context, cloneURL string, target SiteTarget, owner, repo, userToken string) error {
+func (g *GitOperations) deploy(ctx context.Context, clone *url.URL, target SiteTarget, token string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := g.validateTarget(target); err != nil {
 		return err
 	}
-	clone, err := url.Parse(cloneURL)
-	if err != nil {
-		return fmt.Errorf("parse clone URL: %w", err)
-	}
-	token := userToken
-	if token == "" {
-		token = g.accessToken
-	}
-
 	// Create temp directory for cloning
 	tempDir, err := os.MkdirTemp("", "gitea-pages-*")
 	if err != nil {
