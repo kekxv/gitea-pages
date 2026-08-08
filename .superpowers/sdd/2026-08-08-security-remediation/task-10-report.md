@@ -35,3 +35,17 @@ Executed from `deployer/` using the cached Go 1.26 toolchain:
 /usr/local/go/bin/go test -race ./...                                      # PASS
 git diff --check                                                            # PASS
 ```
+
+## Round 1 remediation
+
+- Every migration Gitea collection request now uses numbered `page` and
+  `limit=100` parameters and continues until Gitea returns an empty page. This
+  covers personal hooks, organization discovery, and each organization hook
+  list, so legacy hooks beyond page one are rotated.
+- The migration now appends the exact legacy rollback record before issuing
+  each Gitea PATCH. Consequently, a transport error is treated as ambiguous:
+  the compensating legacy PATCH is attempted even when Gitea may have applied
+  the secure change before disconnecting.
+- Added a multi-page fake-Gitea test (user hooks, organization list, and
+  organization hooks) plus an “apply then disconnect” PATCH test that verifies
+  the former secret and authorization header are restored.

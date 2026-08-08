@@ -126,6 +126,46 @@ func TestMigrationCanSkipFailedOrganizationButNamesIt(t *testing.T) {
 	}
 }
 
+func TestMigrationPaginatesUserOrganizationAndHookLists(t *testing.T) {
+	server := newPaginatedMigrationGiteaServer(t)
+	config := seedLegacyMigration(t, server.URL)
+
+	if err := RunSecurityMigration(context.Background(), config); err != nil {
+		t.Fatalf("RunSecurityMigration() error = %v", err)
+	}
+	assertHookCredentialCount(t, config.DatabasePath, 5)
+	for _, path := range []string{
+		"/api/v1/user/hooks/12",
+		"/api/v1/orgs/engineering/hooks/22",
+		"/api/v1/orgs/operations/hooks/31",
+	} {
+		if _, ok := server.patch(path); !ok {
+			t.Errorf("page-two hook %s was not rotated", path)
+		}
+	}
+}
+
+func TestMigrationRestoresHookAfterAmbiguousPatchFailure(t *testing.T) {
+	server := newMigrationGiteaServer(t, false, false)
+	server.disconnectNextUserPatch = true
+	config := seedLegacyMigration(t, server.URL)
+
+	if err := RunSecurityMigration(context.Background(), config); err == nil {
+		t.Fatal("expected migration failure after disconnected PATCH")
+	}
+	assertLegacyTokenRowExists(t, config.DatabasePath, "alice")
+	payload, ok := server.patch("/api/v1/user/hooks/11")
+	if !ok {
+		t.Fatal("migration did not attempt the user hook PATCH")
+	}
+	if got := payload.Config["secret"]; got != "legacy-webhook-secret" {
+		t.Fatalf("ambiguous PATCH left hook secret = %q, want restored legacy secret", got)
+	}
+	if got := payload.AuthorizationHeader; got != "Bearer legacy-user" {
+		t.Fatalf("ambiguous PATCH left authorization = %q, want restored legacy header", got)
+	}
+}
+
 func TestRestoreLegacyHooksReadsEncryptedManifestAndRestoresLegacyCredential(t *testing.T) {
 	server := newMigrationGiteaServer(t, false, false)
 	config := seedLegacyMigration(t, server.URL)
@@ -219,10 +259,27 @@ func assertNoHookCredentialRows(t *testing.T, dbPath string) {
 	}
 }
 
+func assertHookCredentialCount(t *testing.T, dbPath string, want int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hook_credentials`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("hook credential rows = %d, want %d", count, want)
+	}
+}
+
 type migrationGiteaServer struct {
 	*httptest.Server
-	mu      sync.Mutex
-	patches map[string]migrationHookPatch
+	mu                      sync.Mutex
+	patches                 map[string]migrationHookPatch
+	disconnectNextUserPatch bool
 }
 
 type migrationHookPatch struct {
@@ -237,6 +294,16 @@ func (s *migrationGiteaServer) patch(path string) (migrationHookPatch, bool) {
 	return patch, ok
 }
 
+func (s *migrationGiteaServer) takeUserPatchDisconnect() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.disconnectNextUserPatch {
+		return false
+	}
+	s.disconnectNextUserPatch = false
+	return true
+}
+
 func newMigrationGiteaServer(t *testing.T, failUserPatch, failOrganizationPatch bool) *migrationGiteaServer {
 	t.Helper()
 	server := &migrationGiteaServer{patches: make(map[string]migrationHookPatch)}
@@ -245,12 +312,25 @@ func newMigrationGiteaServer(t *testing.T, failUserPatch, failOrganizationPatch 
 		return webhookInfo{ID: id, Type: "gitea", Config: webhookConfig{URL: "https://pages.example.com/webhook", ContentType: "json", Secret: "legacy-webhook-secret"}, Events: []string{"push", "delete"}, Active: true, BranchFilter: "gh-pages", AuthorizationHeader: authorizationHeader}
 	}
 	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/hooks":
+			if page != "" && page != "1" {
+				_ = json.NewEncoder(w).Encode([]webhookInfo{})
+				return
+			}
 			_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(11, "Bearer legacy-user")})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/orgs":
+			if page != "" && page != "1" {
+				_ = json.NewEncoder(w).Encode([]map[string]string{})
+				return
+			}
 			_ = json.NewEncoder(w).Encode([]map[string]string{{"username": "engineering"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/orgs/engineering/hooks":
+			if page != "" && page != "1" {
+				_ = json.NewEncoder(w).Encode([]webhookInfo{})
+				return
+			}
 			_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(22, "Bearer legacy-org")})
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/user/hooks/11":
 			if failUserPatch {
@@ -258,12 +338,80 @@ func newMigrationGiteaServer(t *testing.T, failUserPatch, failOrganizationPatch 
 				return
 			}
 			server.recordPatch(t, r)
+			if server.takeUserPatchDisconnect() {
+				connection, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack ambiguous PATCH connection: %v", err)
+					return
+				}
+				_ = connection.Close()
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/orgs/engineering/hooks/22":
 			if failOrganizationPatch {
 				http.Error(w, "organization hook update denied", http.StatusForbidden)
 				return
 			}
+			server.recordPatch(t, r)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	return server
+}
+
+func newPaginatedMigrationGiteaServer(t *testing.T) *migrationGiteaServer {
+	t.Helper()
+	server := &migrationGiteaServer{patches: make(map[string]migrationHookPatch)}
+	t.Cleanup(func() { server.Close() })
+	legacyHook := func(id int64, authorizationHeader string) webhookInfo {
+		return webhookInfo{ID: id, Type: "gitea", Config: webhookConfig{URL: "https://pages.example.com/webhook", ContentType: "json", Secret: "legacy-webhook-secret"}, Events: []string{"push", "delete"}, Active: true, BranchFilter: "gh-pages", AuthorizationHeader: authorizationHeader}
+	}
+	page := func(request *http.Request) string {
+		if value := request.URL.Query().Get("page"); value != "" {
+			return value
+		}
+		return "1"
+	}
+	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/hooks":
+			switch page(r) {
+			case "1":
+				_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(11, "Bearer legacy-user")})
+			case "2":
+				_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(12, "Bearer legacy-user")})
+			default:
+				_ = json.NewEncoder(w).Encode([]webhookInfo{})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/orgs":
+			switch page(r) {
+			case "1":
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"username": "engineering"}})
+			case "2":
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"username": "operations"}})
+			default:
+				_ = json.NewEncoder(w).Encode([]map[string]string{})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/orgs/engineering/hooks":
+			switch page(r) {
+			case "1":
+				_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(21, "Bearer legacy-engineering")})
+			case "2":
+				_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(22, "Bearer legacy-engineering")})
+			default:
+				_ = json.NewEncoder(w).Encode([]webhookInfo{})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/orgs/operations/hooks":
+			switch page(r) {
+			case "1":
+				_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(31, "Bearer legacy-operations")})
+			default:
+				_ = json.NewEncoder(w).Encode([]webhookInfo{})
+			}
+		case r.Method == http.MethodPatch:
 			server.recordPatch(t, r)
 			w.WriteHeader(http.StatusNoContent)
 		default:

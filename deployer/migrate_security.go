@@ -20,6 +20,8 @@ import (
 
 const securityMigrationManifestVersion = 1
 
+const migrationGiteaPageLimit = 100
+
 // SecurityMigrationConfig contains every input required by the offline
 // credential migration. It deliberately accepts paths and secrets directly so
 // the HTTP server never needs to participate in a migration.
@@ -430,15 +432,18 @@ func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaCli
 			return fail(err)
 		}
 		credential.GiteaHookID = hook.ID
-		if err := client.updateHook(ctx, accessToken, principal, hook.ID, secureHookPayload(config.WebhookURL, credential)); err != nil {
-			return fail(err)
-		}
+		// Record the exact legacy state before PATCH. A connection can fail after
+		// Gitea has applied the update, so an error response cannot prove that
+		// no remote mutation occurred.
 		record := legacyHookRollbackRecord{
 			GiteaAPIURL: client.apiURL, AccessToken: accessToken, ScopeType: principal.ScopeType, ScopeName: principal.ScopeName,
 			GiteaHookID: hook.ID, URL: hook.Config.URL, ContentType: hook.Config.ContentType, Events: hook.Events,
 			Active: hook.Active, BranchFilter: hook.BranchFilter, AuthorizationHeader: hook.AuthorizationHeader,
 		}
 		records = append(records, record)
+		if err := client.updateHook(ctx, accessToken, principal, hook.ID, secureHookPayload(config.WebhookURL, credential)); err != nil {
+			return fail(err)
+		}
 		if err := insertMigrationHookCredential(ctx, tx, credential); err != nil {
 			return fail(err)
 		}
@@ -565,56 +570,76 @@ type migrationGiteaClient struct {
 }
 
 func (c migrationGiteaClient) organizations(ctx context.Context, token string) ([]string, error) {
-	request, err := c.request(ctx, token, http.MethodGet, "/api/v1/user/orgs", nil)
-	if err != nil {
-		return nil, err
-	}
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
-		return nil, giteaHookError(response)
-	}
-	var organizations []struct {
-		Username string `json:"username"`
-		Name     string `json:"name"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&organizations); err != nil {
-		return nil, err
-	}
-	result := make([]string, 0, len(organizations))
-	for _, organization := range organizations {
-		name := organization.Username
-		if name == "" {
-			name = organization.Name
+	var result []string
+	for page := 1; ; page++ {
+		request, err := c.request(ctx, token, http.MethodGet, migrationPagePath("/api/v1/user/orgs", page), nil)
+		if err != nil {
+			return nil, err
 		}
-		if name != "" {
-			result = appendUnique(result, name)
+		response, err := c.httpClient.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode >= http.StatusBadRequest {
+			apiErr := giteaHookError(response)
+			response.Body.Close()
+			return nil, apiErr
+		}
+		var organizations []struct {
+			Username string `json:"username"`
+			Name     string `json:"name"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&organizations)
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if len(organizations) == 0 {
+			return result, nil
+		}
+		for _, organization := range organizations {
+			name := organization.Username
+			if name == "" {
+				name = organization.Name
+			}
+			if name != "" {
+				result = appendUnique(result, name)
+			}
 		}
 	}
-	return result, nil
 }
 
 func (c migrationGiteaClient) hooks(ctx context.Context, token string, principal HookPrincipal) ([]webhookInfo, error) {
-	request, err := c.request(ctx, token, http.MethodGet, c.hookPath(principal, 0), nil)
-	if err != nil {
-		return nil, err
+	var result []webhookInfo
+	for page := 1; ; page++ {
+		request, err := c.request(ctx, token, http.MethodGet, migrationPagePath(c.hookPath(principal, 0), page), nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err := c.httpClient.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode >= http.StatusBadRequest {
+			apiErr := giteaHookError(response)
+			response.Body.Close()
+			return nil, apiErr
+		}
+		var hooks []webhookInfo
+		decodeErr := json.NewDecoder(response.Body).Decode(&hooks)
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if len(hooks) == 0 {
+			return result, nil
+		}
+		result = append(result, hooks...)
 	}
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
-		return nil, giteaHookError(response)
-	}
-	var hooks []webhookInfo
-	if err := json.NewDecoder(response.Body).Decode(&hooks); err != nil {
-		return nil, err
-	}
-	return hooks, nil
+}
+
+func migrationPagePath(path string, page int) string {
+	return fmt.Sprintf("%s?page=%d&limit=%d", path, page, migrationGiteaPageLimit)
 }
 
 func (c migrationGiteaClient) updateHook(ctx context.Context, token string, principal HookPrincipal, hookID int64, payload map[string]interface{}) error {

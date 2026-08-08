@@ -155,3 +155,57 @@ Run: `docker run --rm -v "$PWD/deployer:/src" -w /src golang:1.26-alpine go test
 git add deployer/migrate_security.go deployer/migrate_security_test.go deployer/main.go deployer/storage.go README.md docs/superpowers/plans/2026-08-08-security-migration.md .superpowers/sdd/2026-08-08-security-remediation/task-10-report.md
 git commit -m "security: add transactional credential migration"
 ```
+
+---
+
+### Round 1: Exhaustive pagination and ambiguous PATCH recovery
+
+**Files:**
+- Modify: `deployer/migrate_security.go`
+- Modify: `deployer/migrate_security_test.go`
+- Modify: `.superpowers/sdd/2026-08-08-security-remediation/task-10-report.md`
+
+**Interfaces:**
+- `migrationGiteaClient.organizations` and `migrationGiteaClient.hooks` consume every numbered Gitea API page.
+- `rotateLegacyHooks` records the legacy hook payload before each PATCH so any transport error can be compensated.
+
+- [x] **Step 1: Write failing tests**
+
+```go
+func TestMigrationPaginatesUserAndOrganizationHooks(t *testing.T) {
+	server := newPaginatedMigrationGiteaServer(t)
+	config := seedLegacyMigration(t, server.URL)
+	if err := RunSecurityMigration(context.Background(), config); err != nil { t.Fatal(err) }
+	assertHookCredentialCount(t, config.DatabasePath, 3)
+}
+
+func TestMigrationRestoresHookAfterAmbiguousPatchFailure(t *testing.T) {
+	server := newMigrationGiteaServer(t, false, false)
+	server.disconnectNextUserPatch = true
+	config := seedLegacyMigration(t, server.URL)
+	if err := RunSecurityMigration(context.Background(), config); err == nil { t.Fatal("expected failure") }
+	assertLegacyTokenRowExists(t, config.DatabasePath, "alice")
+	assertLegacyPatch(t, server, "/api/v1/user/hooks/11")
+}
+```
+
+- [x] **Step 2: Run tests to verify they fail**
+
+Run: `/usr/local/go/bin/go test -count=1 -run 'TestMigrationPaginates|TestMigrationRestoresHookAfterAmbiguous' -v`
+
+Expected: pagination leaves page-two hooks unrotated and a failed transport PATCH does not restore the remote hook.
+
+- [x] **Step 3: Implement the minimum changes**
+
+Use numbered `page` and bounded `limit` query parameters for every user/org/hook list. Accumulate all pages until Gitea returns an empty page. Append the legacy rollback record before issuing a hook PATCH, then preserve the existing reverse-order compensating restore path for all errors.
+
+- [x] **Step 4: Run focused, full, and race checks**
+
+Run: `/usr/local/go/bin/go test -count=1 -run 'TestMigration|TestRestoreLegacyHooks' -v && /usr/local/go/bin/go test -count=1 ./... && /usr/local/go/bin/go test -count=1 -race ./...`
+
+- [x] **Step 5: Update report and commit**
+
+```bash
+git add deployer/migrate_security.go deployer/migrate_security_test.go docs/superpowers/plans/2026-08-08-security-migration.md .superpowers/sdd/2026-08-08-security-remediation/task-10-report.md
+git commit -m "security: paginate credential migration hooks"
+```
