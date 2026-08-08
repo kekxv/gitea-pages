@@ -105,8 +105,8 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SESSION_SECRET_FILE: %w", err)
 	}
-	if len(sessionSecret) > 0 && len(sessionSecret) < 32 {
-		return nil, errors.New("SESSION_SECRET_FILE must contain at least 32 bytes")
+	if len(sessionSecret) < 32 {
+		return nil, errors.New("SESSION_SECRET_FILE or SESSION_SECRET must contain at least 32 bytes")
 	}
 
 	tokenEncryptionKey, err := loadOptionalSecretFile(os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"), "")

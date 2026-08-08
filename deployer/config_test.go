@@ -27,6 +27,22 @@ func TestLoadConfigRejectsNonHTTPSGiteaOutsideDevelopment(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsMissingSessionSecretWithValidGitea(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
+	t.Setenv("SESSION_SECRET_FILE", "")
+	t.Setenv("SESSION_SECRET", "")
+	t.Setenv("OAUTH_CLIENT_ID", "")
+	t.Setenv("OAUTH_CLIENT_SECRET_FILE", "")
+	t.Setenv("OAUTH_CLIENT_SECRET", "")
+	t.Setenv("LEGACY_WEBHOOK_SECRET_FILE", "")
+	t.Setenv("WEBHOOK_SECRET", "")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must reject a valid Gitea configuration with no session secret")
+	}
+}
+
 func TestLoadConfigPrefersLegacyWebhookSecretFile(t *testing.T) {
 	dir := t.TempDir()
 	sessionSecret := writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)+"\n")
