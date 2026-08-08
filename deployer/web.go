@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
@@ -79,45 +78,8 @@ func (h *WebHandler) showStatusLoginPrompt(w http.ResponseWriter, r *http.Reques
 	hasOAuth := h.oauthConfig != nil && h.oauthConfig.ClientID != ""
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
-<head>
-    <title>Gitea Pages - Status</title>
-    <style>
-        * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f9fafb; min-height: 100vh; }
-        .container { background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
-        .header { background: linear-gradient(135deg, #3b82f6 0%%, #1d4ed8 100%%); color: white; padding: 40px; text-align: center; }
-        .header h1 { margin: 0 0 8px 0; font-size: 28px; }
-        .content { padding: 40px; text-align: center; }
-        .icon { font-size: 64px; margin-bottom: 20px; }
-        .message { color: #6b7280; margin: 20px 0; }
-        .btn { display: inline-block; background: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500; margin: 10px; }
-        .btn:hover { background: #2563eb; }
-        .btn-secondary { background: #6b7280; }
-        .btn-secondary:hover { background: #4b5563; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>📊 Gitea Pages Status</h1>
-        </div>
-        <div class="content">
-            <div class="icon">🔐</div>
-            <p class="message">请先授权以查看您的部署状态</p>
-            %s
-            <p><a href="/" class="btn btn-secondary">返回首页</a></p>
-        </div>
-    </div>
-</body>
-</html>
-`, func() string {
-		if hasOAuth {
-			return `<p><a href="/oauth/start" class="btn">授权 Gitea Pages</a></p>`
-		}
-		return `<p style="color: #dc2626;">OAuth 未配置，请联系管理员</p>`
-	}())
+	tmpl := template.Must(template.New("status-login").Parse(statusLoginTemplate))
+	_ = tmpl.Execute(w, struct{ HasOAuth bool }{HasOAuth: hasOAuth})
 }
 
 // showUserStatus shows status for a specific authenticated user
@@ -155,74 +117,19 @@ func (h *WebHandler) showUserStatus(w http.ResponseWriter, username string) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
-<head>
-    <title>Gitea Pages - Status</title>
-    <style>
-        * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f9fafb; min-height: 100vh; }
-        .container { background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
-        .header { background: linear-gradient(135deg, #3b82f6 0%%, #1d4ed8 100%%); color: white; padding: 40px; text-align: center; }
-        .header h1 { margin: 0 0 8px 0; font-size: 28px; }
-        .content { padding: 40px; }
-        .user-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 20px 0; text-align: center; }
-        .user-avatar { width: 64px; height: 64px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 50%%; display: flex; align-items: center; justify-content: center; color: white; font-size: 32px; margin: 0 auto 16px; }
-        .user-name { font-weight: 600; color: #1f2937; font-size: 20px; }
-        .user-status { font-size: 14px; margin-top: 8px; }
-        .status-success { color: #16a34a; }
-        .status-warning { color: #d97706; }
-        .status-error { color: #dc2626; }
-        .status-pending { color: #6b7280; }
-        .info-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 20px 0; }
-        .info-card h2 { color: #1f2937; margin: 0 0 16px 0; font-size: 18px; }
-        .info-card ul { margin: 0; padding-left: 20px; }
-        .info-card li { color: #4b5563; margin: 8px 0; font-size: 14px; }
-        .info-card code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
-        .btn { display: inline-block; background: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500; margin: 10px; }
-        .btn:hover { background: #2563eb; }
-        .btn-secondary { background: #6b7280; }
-        .btn-secondary:hover { background: #4b5563; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>📊 您的授权状态</h1>
-        </div>
-        <div class="content">
-            <div class="user-card">
-                <div class="user-avatar">👤</div>
-                <div class="user-name">%s</div>
-                <div class="user-status %s">%s</div>
-            </div>
-
-            <div class="info-card">
-                <h2>🌐 站点地址</h2>
-                <ul>
-                    <li>根目录站点: <code>%s.%s</code></li>
-                    <li>子目录站点: <code>%s.%s/repo</code></li>
-                </ul>
-            </div>
-
-            <div class="info-card">
-                <h2>🚀 部署步骤</h2>
-                <ul>
-                    <li>创建仓库并添加 <code>gh-pages</code> 分支</li>
-                    <li>推送代码，自动部署完成</li>
-                    <li>删除分支，站点自动移除</li>
-                </ul>
-            </div>
-
-            <div style="text-align: center;">
-                <a href="/" class="btn">← 返回首页</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-`, user.MaskedName, statusClass, statusText, user.Username, h.domain, user.Username, h.domain)
+	tmpl := template.Must(template.New("status-user").Parse(statusUserTemplate))
+	_ = tmpl.Execute(w, struct {
+		MaskedName  string
+		StatusClass string
+		StatusText  string
+		Username    string
+		Domain      string
+	}{user.MaskedName, statusClass, statusText, user.Username, h.domain})
 }
+
+const statusLoginTemplate = `<!doctype html><html><body><h1>📊 Gitea Pages Status</h1><p>请先授权以查看您的部署状态</p>{{if .HasOAuth}}<p><a href="/oauth/start">授权 Gitea Pages</a></p>{{else}}<p>OAuth 未配置，请联系管理员</p>{{end}}</body></html>`
+
+const statusUserTemplate = `<!doctype html><html><body><h1>📊 您的授权状态</h1><div class="user-name">{{.MaskedName}}</div><div class="user-status {{.StatusClass}}">{{.StatusText}}</div><p>根目录站点: <code>{{.Username}}.{{.Domain}}</code></p><p>子目录站点: <code>{{.Username}}.{{.Domain}}/repo</code></p><a href="/">返回首页</a></body></html>`
 
 // GetUserToken returns a user's token for use in deployments
 func (h *WebHandler) GetUserToken(username string) string {

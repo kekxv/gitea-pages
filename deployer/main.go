@@ -286,6 +286,23 @@ func getEnvOrDefault(key, defaultVal string) string {
 	return val
 }
 
+func oauthConfigFromAppConfig(config *Config) *OAuthConfig {
+	publicURL := config.GiteaPublicURL
+	if publicURL == "" {
+		publicURL = config.GiteaAPIURL
+	}
+	return &OAuthConfig{
+		ClientID:                 config.OAuthClientID,
+		ClientSecret:             config.OAuthClientSecret,
+		RedirectURL:              config.OAuthRedirectURL,
+		AuthURL:                  strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
+		TokenURL:                 strings.TrimSuffix(config.GiteaAPIURL, "/") + "/login/oauth/access_token",
+		APIURL:                   config.GiteaAPIURL,
+		PublicAuthURL:            strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
+		DisableOrganizationHooks: !config.EnableOrganizationHooks,
+	}
+}
+
 func main() {
 	config, err := LoadConfig()
 	if err != nil {
@@ -305,26 +322,12 @@ func main() {
 	deployer.SetTokenStore(tokenStore)
 
 	// Initialize web handler
-	webHandler := NewWebHandler(nil, tokenStore, config.Domain, config.WebhookSecret)
+	webHandler := NewWebHandler(nil, tokenStore, config.Domain, string(config.SessionSecret))
 
 	// Initialize OAuth handler if configured
 	var oauthHandler *OAuthHandler
 	if config.OAuthClientID != "" && config.GiteaAPIURL != "" {
-		// Use GiteaPublicURL for browser redirects, GiteaAPIURL for internal API calls
-		publicURL := config.GiteaPublicURL
-		if publicURL == "" {
-			publicURL = config.GiteaAPIURL // fallback to internal URL
-		}
-
-		oauthConfig := &OAuthConfig{
-			ClientID:      config.OAuthClientID,
-			ClientSecret:  config.OAuthClientSecret,
-			RedirectURL:   config.OAuthRedirectURL,
-			AuthURL:       strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
-			TokenURL:      strings.TrimSuffix(config.GiteaAPIURL, "/") + "/login/oauth/access_token",
-			APIURL:        config.GiteaAPIURL,
-			PublicAuthURL: strings.TrimSuffix(publicURL, "/") + "/login/oauth/authorize",
-		}
+		oauthConfig := oauthConfigFromAppConfig(config)
 
 		// Use WebhookPublicURL if set, otherwise derive from redirect URL
 		webhookURL := config.WebhookPublicURL
@@ -343,7 +346,7 @@ func main() {
 		log.Printf("OAuth Token URL (internal): %s", oauthConfig.TokenURL)
 		log.Printf("Webhook URL for OAuth registrations: %s", webhookURL)
 
-		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, config.WebhookSecret)
+		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, string(config.SessionSecret))
 		webHandler.oauthConfig = oauthConfig
 		deployer.SetOAuthHandler(oauthHandler)
 

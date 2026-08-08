@@ -128,6 +128,15 @@ func (s *TokenStore) initDB() (err error) {
 		PRIMARY KEY (hook_key, delivery_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received_at ON webhook_deliveries(received_at);
+	CREATE TABLE IF NOT EXISTS organization_hook_authorizers (
+		organization_name TEXT NOT NULL,
+		username TEXT NOT NULL,
+		hook_key TEXT NOT NULL,
+		authorized_at DATETIME NOT NULL,
+		PRIMARY KEY (organization_name, username),
+		FOREIGN KEY (hook_key) REFERENCES hook_credentials(hook_key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_organization_hook_authorizers_hook_key ON organization_hook_authorizers(hook_key);
 	`
 
 	_, err = tx.Exec(createTableSQL)
@@ -476,6 +485,48 @@ func (s *TokenStore) PutHook(ctx context.Context, credential HookCredential) err
 		time.Now().UTC(),
 	)
 	return err
+}
+
+// PutOrganizationHookAuthorizer records every administrator who has approved
+// an organization hook. Subsequent approvals do not replace prior identities.
+func (s *TokenStore) PutOrganizationHookAuthorizer(ctx context.Context, organizationName, username, hookKey string) error {
+	if s.db == nil {
+		return fmt.Errorf("hook credential storage is unavailable")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO organization_hook_authorizers (organization_name, username, hook_key, authorized_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(organization_name, username) DO UPDATE SET
+			hook_key = excluded.hook_key,
+			authorized_at = excluded.authorized_at
+	`, organizationName, username, hookKey, time.Now().UTC())
+	return err
+}
+
+// OrganizationHookAuthorizers returns the persistent pool of administrators
+// that authorized an organization hook.
+func (s *TokenStore) OrganizationHookAuthorizers(ctx context.Context, organizationName string) ([]string, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("hook credential storage is unavailable")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT username FROM organization_hook_authorizers
+		WHERE organization_name = ?
+		ORDER BY authorized_at ASC, username ASC
+	`, organizationName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var usernames []string
+	for rows.Next() {
+		var username string
+		if err := rows.Scan(&username); err != nil {
+			return nil, err
+		}
+		usernames = append(usernames, username)
+	}
+	return usernames, rows.Err()
 }
 
 // RecordDelivery records a delivery exactly once for a hook.

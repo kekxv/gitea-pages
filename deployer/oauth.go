@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,13 +22,16 @@ import (
 
 // OAuthConfig holds OAuth2 configuration
 type OAuthConfig struct {
-	ClientID        string
-	ClientSecret    string
-	RedirectURL     string
-	AuthURL         string
-	TokenURL        string
-	APIURL          string
-	PublicAuthURL   string // URL for browser redirects (may differ from AuthURL for internal API)
+	ClientID      string
+	ClientSecret  string
+	RedirectURL   string
+	AuthURL       string
+	TokenURL      string
+	APIURL        string
+	PublicAuthURL string // URL for browser redirects (may differ from AuthURL for internal API)
+	// DisableOrganizationHooks preserves the secure default of registering
+	// organization hooks unless an operator explicitly turns it off.
+	DisableOrganizationHooks bool
 }
 
 // UserToken represents a user's OAuth2 token
@@ -63,6 +70,27 @@ func generateState() (string, error) {
 		return "", err
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// createHookCredential creates credentials that identify exactly one Gitea
+// hook. Both values are URL-safe so the key can be sent in Authorization and
+// the secret can be supplied to Gitea without further escaping.
+func createHookCredential(principal HookPrincipal) (HookCredential, error) {
+	key := make([]byte, 32)
+	secret := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return HookCredential{}, fmt.Errorf("generate hook key: %w", err)
+	}
+	if _, err := rand.Read(secret); err != nil {
+		return HookCredential{}, fmt.Errorf("generate hook secret: %w", err)
+	}
+	return HookCredential{
+		Key:               base64.RawURLEncoding.EncodeToString(key),
+		Secret:            []byte(base64.RawURLEncoding.EncodeToString(secret)),
+		PrincipalUsername: principal.Username,
+		ScopeType:         principal.ScopeType,
+		ScopeName:         principal.ScopeName,
+	}, nil
 }
 
 // HandleStart starts the OAuth2 authorization flow
@@ -145,21 +173,10 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine redirect URL based on request Host
-	host := r.Host
-	redirectURL := h.config.RedirectURL
 	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-	scheme := "http"
-	if isSecure {
-		scheme = "https"
-	}
 
-	// If request comes from a different host, construct redirect URL from request
-	if host != "" && !strings.Contains(h.config.RedirectURL, host) {
-		redirectURL = fmt.Sprintf("%s://%s/oauth/callback", scheme, host)
-	}
-
-	// Store both state and redirect URL in cookie
+	// The configured callback must be used for both authorization and token
+	// exchange. Request headers are attacker controlled and must never select it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oauth_state",
 		Value:    state,
@@ -169,34 +186,27 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Secure:   isSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_redirect",
-		Value:    redirectURL,
-		Path:     "/",
-		MaxAge:   300,
-		HttpOnly: true,
-		Secure:   isSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
-
 	// Use PublicAuthURL for browser redirect (different from internal AuthURL)
 	authURL := h.config.PublicAuthURL
 	if authURL == "" {
 		authURL = h.config.AuthURL // fallback
 	}
 
-	// Redirect to OAuth provider
-	// SECURITY: Removed write:repository scope - we only need read access for cloning
-	// write:repository would allow pushing code, deleting branches, modifying repo settings
-	// Added access_type=offline to get refresh_token for automatic token renewal
-	authRedirectURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&state=%s&scope=read:user%%20write:user%%20read:repository%%20write:organization&access_type=offline",
-		authURL,
-		h.config.ClientID,
-		redirectURL,
-		state,
-	)
+	scopes := []string{"read:user", "write:user", "read:repository"}
+	if !h.config.DisableOrganizationHooks {
+		scopes = append(scopes, "write:organization")
+	}
+	q := url.Values{
+		"client_id":     {h.config.ClientID},
+		"redirect_uri":  {h.config.RedirectURL},
+		"response_type": {"code"},
+		"state":         {state},
+		"scope":         {strings.Join(scopes, " ")},
+		"access_type":   {"offline"},
+	}
+	authRedirectURL := authURL + "?" + q.Encode()
 
-	log.Printf("OAuth redirect initiated for host: %s", host)
+	log.Printf("OAuth redirect initiated")
 	http.Redirect(w, r, authRedirectURL, http.StatusTemporaryRedirect)
 }
 
@@ -213,17 +223,24 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if stateCookie.Value != r.URL.Query().Get("state") {
+	callbackState := r.URL.Query().Get("state")
+	validState := len(stateCookie.Value) == len(callbackState) && hmac.Equal([]byte(stateCookie.Value), []byte(callbackState))
+	// State is single-use regardless of callback success, preventing replay of a
+	// valid state value after an interrupted or failed exchange.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+		HttpOnly: true,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+	if !validState {
 		log.Printf("OAuth state mismatch")
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
-	}
-
-	// Get the redirect URL that was used during authorization
-	redirectCookie, err := r.Cookie("oauth_redirect")
-	redirectURL := h.config.RedirectURL
-	if err == nil && redirectCookie.Value != "" {
-		redirectURL = redirectCookie.Value
 	}
 
 	code := r.URL.Query().Get("code")
@@ -233,7 +250,7 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for token with the same redirect URL used in authorization
-	token, err := h.exchangeCode(code, redirectURL)
+	token, err := h.exchangeCode(code, h.config.RedirectURL)
 	if err != nil {
 		log.Printf("Failed to exchange token: %v", err)
 		http.Error(w, "Failed to get token", http.StatusInternalServerError)
@@ -274,38 +291,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// SECURITY: Mask username to prevent information leakage
 	maskedUsername := maskUsername(userToken.Username)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>授权成功</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 80px auto; padding: 20px; text-align: center; }
-        .success { color: #22c55e; font-size: 64px; }
-        h1 { color: #1f2937; }
-        .info { background: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .status { background: #dbeafe; border: 1px solid #3b82f6; padding: 16px; border-radius: 8px; margin: 16px 0; }
-        .status p { margin: 4px 0; color: #1e40af; }
-        a { color: #3b82f6; }
-        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
-    </style>
-</head>
-<body>
-    <div class="success">✓</div>
-    <h1>授权成功！</h1>
-    <div class="info">
-        <p><strong>用户:</strong> %s</p>
-    </div>
-    <div class="status">
-        <p>⏳ 正在后台注册 Webhook...</p>
-        <p style="font-size: 12px; color: #6b7280;">如果您的组织较多，可能需要几秒钟</p>
-    </div>
-    <p>现在你可以推送代码到 <code>gh-pages</code> 分支来自动部署你的网站了。</p>
-    <p><a href="/">返回首页</a> | <a href="/status">查看状态</a></p>
-</body>
-</html>
-`, maskedUsername)
+	tmpl := template.Must(template.New("oauth-callback-success").Parse(oauthCallbackSuccessTemplate))
+	_ = tmpl.Execute(w, struct{ Username string }{Username: maskedUsername})
 }
+
+const oauthCallbackSuccessTemplate = `<!doctype html><html><body><h1>授权成功！</h1><p><strong>用户:</strong> {{.Username}}</p><p>⏳ 正在后台注册 Webhook...</p><p><a href="/">返回首页</a> | <a href="/status">查看状态</a></p></body></html>`
 
 // OAuthTokenResponse represents the token response
 type OAuthTokenResponse struct {
@@ -317,16 +307,17 @@ type OAuthTokenResponse struct {
 
 // exchangeCode exchanges authorization code for access token
 func (h *OAuthHandler) exchangeCode(code string, redirectURL string) (*OAuthTokenResponse, error) {
-	url := h.config.TokenURL
+	endpoint := h.config.TokenURL
 
-	data := fmt.Sprintf("grant_type=authorization_code&client_id=%s&client_secret=%s&redirect_uri=%s&code=%s",
-		h.config.ClientID,
-		h.config.ClientSecret,
-		redirectURL,
-		code,
-	)
+	data := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {h.config.ClientID},
+		"client_secret": {h.config.ClientSecret},
+		"redirect_uri":  {redirectURL},
+		"code":          {code},
+	}.Encode()
 
-	req, err := http.NewRequest("POST", url, strings.NewReader(data))
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -403,15 +394,16 @@ func (h *OAuthHandler) getUserInfo(token string) (map[string]interface{}, error)
 // refreshAccessToken refreshes an expired access token using the refresh token
 // Returns the new token response or error
 func (h *OAuthHandler) refreshAccessToken(refreshToken string) (*OAuthTokenResponse, error) {
-	url := h.config.TokenURL
+	endpoint := h.config.TokenURL
 
-	data := fmt.Sprintf("grant_type=refresh_token&client_id=%s&client_secret=%s&refresh_token=%s",
-		h.config.ClientID,
-		h.config.ClientSecret,
-		refreshToken,
-	)
+	data := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {h.config.ClientID},
+		"client_secret": {h.config.ClientSecret},
+		"refresh_token": {refreshToken},
+	}.Encode()
 
-	req, err := http.NewRequest("POST", url, strings.NewReader(data))
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -542,12 +534,12 @@ func min(a, b int) int {
 
 // WebhookRegistrationResult holds the result of webhook registration
 type WebhookRegistrationResult struct {
-	UserWebhookError  string
-	OrgWebhookErrors  []string
-	OrgsFound         int
-	HasScopeError     bool
-	Success           bool
-	Message           string
+	UserWebhookError string
+	OrgWebhookErrors []string
+	OrgsFound        int
+	HasScopeError    bool
+	Success          bool
+	Message          string
 }
 
 // registerWebhooks registers webhooks at user level and organization level
@@ -583,6 +575,15 @@ func (h *OAuthHandler) registerWebhooksWithResult(userToken *UserToken) *Webhook
 		}
 	} else {
 		log.Printf("User-level webhook registered for %s", userToken.Username)
+	}
+	if h.config.DisableOrganizationHooks {
+		result.Success = !result.HasScopeError && result.UserWebhookError == ""
+		if result.UserWebhookError != "" {
+			result.Message = "用户级 Webhook 注册失败: " + result.UserWebhookError
+		} else {
+			result.Message = "用户级 Webhook 注册成功"
+		}
+		return result
 	}
 
 	// 2. Register organization-level webhooks (covers all repos in organizations)
@@ -693,16 +694,19 @@ func (h *OAuthHandler) getUserOrganizations(token string) ([]string, error) {
 
 // webhookConfig represents webhook config for comparison
 type webhookConfig struct {
-	URL string `json:"url"`
+	URL         string `json:"url"`
+	ContentType string `json:"content_type"`
+	Secret      string `json:"secret"`
 }
 
 // webhookInfo represents webhook info from API
 type webhookInfo struct {
-	ID                 int64         `json:"id"`
-	Type               string        `json:"type"`
-	Config             webhookConfig `json:"config"`
-	Events             []string      `json:"events"`
-	Active             bool          `json:"active"`
+	ID                  int64         `json:"id"`
+	Type                string        `json:"type"`
+	Config              webhookConfig `json:"config"`
+	Events              []string      `json:"events"`
+	Active              bool          `json:"active"`
+	BranchFilter        string        `json:"branch_filter"`
 	AuthorizationHeader string        `json:"authorization_header"`
 }
 
@@ -854,9 +858,204 @@ func (h *OAuthHandler) updateUserWebhook(token string, id int64, payload map[str
 	return nil
 }
 
+func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal) error {
+	ctx := context.Background()
+	existing, err := h.findScopedHook(token, principal)
+	if err != nil {
+		return err
+	}
+	if existing != nil && strings.HasPrefix(existing.AuthorizationHeader, "Gitea-Pages ") {
+		key := strings.TrimPrefix(existing.AuthorizationHeader, "Gitea-Pages ")
+		stored, err := h.store.GetHook(ctx, key)
+		if err != nil {
+			return fmt.Errorf("load existing hook credential: %w", err)
+		}
+		if stored != nil && stored.ScopeType == principal.ScopeType && stored.ScopeName == principal.ScopeName {
+			if principal.ScopeType == ScopeOrganization {
+				if err := h.store.PutOrganizationHookAuthorizer(ctx, principal.ScopeName, principal.Username, stored.Key); err != nil {
+					return fmt.Errorf("save organization hook authorizer: %w", err)
+				}
+			}
+			return nil
+		}
+	}
+
+	credential, err := createHookCredential(principal)
+	if err != nil {
+		return err
+	}
+	payload := h.hookPayload(credential)
+	created := existing == nil
+	var hookID int64
+	if created {
+		hookID, err = h.createScopedHook(token, principal, payload)
+	} else {
+		hookID = existing.ID
+		err = h.updateScopedHook(token, principal, existing.ID, payload)
+	}
+	if err != nil {
+		return err
+	}
+	credential.GiteaHookID = hookID
+	if err := h.store.PutHook(ctx, credential); err != nil {
+		rollbackErr := h.rollbackScopedHook(token, principal, existing, created, hookID)
+		if rollbackErr != nil {
+			return fmt.Errorf("save hook credential: %w (Gitea rollback: %v)", err, rollbackErr)
+		}
+		return fmt.Errorf("save hook credential: %w", err)
+	}
+	if principal.ScopeType == ScopeOrganization {
+		if err := h.store.PutOrganizationHookAuthorizer(ctx, principal.ScopeName, principal.Username, credential.Key); err != nil {
+			return fmt.Errorf("save organization hook authorizer: %w", err)
+		}
+	}
+	return nil
+}
+
+func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "gitea",
+		"config": map[string]string{
+			"url":          h.webhookURL,
+			"content_type": "json",
+			"secret":       string(credential.Secret),
+		},
+		"events":               []string{"push", "delete"},
+		"active":               true,
+		"branch_filter":        "gh-pages",
+		"authorization_header": "Gitea-Pages " + credential.Key,
+	}
+}
+
+func (h *OAuthHandler) findScopedHook(token string, principal HookPrincipal) (*webhookInfo, error) {
+	endpoint := h.scopedHookURL(principal)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+	var hooks []webhookInfo
+	if err := json.NewDecoder(resp.Body).Decode(&hooks); err != nil {
+		return nil, err
+	}
+	for i := range hooks {
+		if hooks[i].Config.URL == h.webhookURL {
+			return &hooks[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (h *OAuthHandler) scopedHookURL(principal HookPrincipal) string {
+	base := strings.TrimSuffix(h.config.APIURL, "/") + "/api/v1/"
+	if principal.ScopeType == ScopeOrganization {
+		return base + "orgs/" + url.PathEscape(principal.ScopeName) + "/hooks"
+	}
+	return base + "user/hooks"
+}
+
+func (h *OAuthHandler) createScopedHook(token string, principal HookPrincipal, payload map[string]interface{}) (int64, error) {
+	response, err := h.sendScopedHook(token, principal, http.MethodPost, 0, payload)
+	if err != nil {
+		return 0, err
+	}
+	if response.ID <= 0 {
+		return 0, errors.New("Gitea created hook without an ID")
+	}
+	return response.ID, nil
+}
+
+func (h *OAuthHandler) updateScopedHook(token string, principal HookPrincipal, id int64, payload map[string]interface{}) error {
+	_, err := h.sendScopedHook(token, principal, http.MethodPatch, id, payload)
+	return err
+}
+
+func (h *OAuthHandler) sendScopedHook(token string, principal HookPrincipal, method string, id int64, payload map[string]interface{}) (*webhookInfo, error) {
+	endpoint := h.scopedHookURL(principal)
+	if id > 0 {
+		endpoint += "/" + strconv.FormatInt(id, 10)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(method, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, giteaHookError(resp)
+	}
+	var hook webhookInfo
+	if err := json.NewDecoder(resp.Body).Decode(&hook); err != nil && err != io.EOF {
+		return nil, err
+	}
+	return &hook, nil
+}
+
+func (h *OAuthHandler) rollbackScopedHook(token string, principal HookPrincipal, previous *webhookInfo, created bool, id int64) error {
+	if created {
+		endpoint := h.scopedHookURL(principal) + "/" + strconv.FormatInt(id, 10)
+		req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= http.StatusBadRequest {
+			return giteaHookError(resp)
+		}
+		return nil
+	}
+	if previous == nil {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"type":                 previous.Type,
+		"config":               previous.Config,
+		"events":               previous.Events,
+		"active":               previous.Active,
+		"branch_filter":        previous.BranchFilter,
+		"authorization_header": previous.AuthorizationHeader,
+	}
+	return h.updateScopedHook(token, principal, previous.ID, payload)
+}
+
+func giteaHookError(resp *http.Response) error {
+	var response struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err == nil && response.Message != "" {
+		return errors.New(response.Message)
+	}
+	return fmt.Errorf("HTTP %d", resp.StatusCode)
+}
+
 // registerOrgWebhook registers a webhook at organization level
 // username is used to construct the authorization_header for webhook
 func (h *OAuthHandler) registerOrgWebhook(token, org, username string) error {
+	if h.store != nil {
+		return h.registerScopedHook(token, HookPrincipal{Username: username, ScopeType: ScopeOrganization, ScopeName: org})
+	}
 	// Construct authorization header with user info (base64 encoded JSON)
 	userInfo := map[string]string{"username": username}
 	userInfoJSON, _ := json.Marshal(userInfo)
@@ -869,9 +1068,9 @@ func (h *OAuthHandler) registerOrgWebhook(token, org, username string) error {
 			"content_type": "json",
 			"secret":       h.secret,
 		},
-		"events":              []string{"push", "delete"},
-		"active":              true,
-		"branch_filter":       "gh-pages",
+		"events":               []string{"push", "delete"},
+		"active":               true,
+		"branch_filter":        "gh-pages",
 		"authorization_header": authHeader,
 	}
 
@@ -931,6 +1130,9 @@ func (h *OAuthHandler) registerOrgWebhook(token, org, username string) error {
 // registerUserWebhook registers a webhook at user level (covers all repositories)
 // username is used to construct the authorization_header for webhook
 func (h *OAuthHandler) registerUserWebhook(token, username string) error {
+	if h.store != nil {
+		return h.registerScopedHook(token, HookPrincipal{Username: username, ScopeType: ScopeUser, ScopeName: username})
+	}
 	// Construct authorization header with user info (base64 encoded JSON)
 	userInfo := map[string]string{"username": username}
 	userInfoJSON, _ := json.Marshal(userInfo)
@@ -943,9 +1145,9 @@ func (h *OAuthHandler) registerUserWebhook(token, username string) error {
 			"content_type": "json",
 			"secret":       h.secret,
 		},
-		"events":              []string{"push", "delete"},
-		"active":              true,
-		"branch_filter":       "gh-pages",
+		"events":               []string{"push", "delete"},
+		"active":               true,
+		"branch_filter":        "gh-pages",
 		"authorization_header": authHeader,
 	}
 
@@ -1001,6 +1203,7 @@ func (h *OAuthHandler) registerUserWebhook(token, username string) error {
 
 	return nil
 }
+
 // Session cookie constants
 const (
 	sessionCookieName = "gitea_pages_session"
@@ -1070,6 +1273,9 @@ func ValidateSession(cookie *http.Cookie, secret string) string {
 		return ""
 	}
 	if time.Now().Unix()-timestamp > int64(sessionDuration.Seconds()) {
+		return ""
+	}
+	if timestamp > time.Now().Add(time.Minute).Unix() {
 		return ""
 	}
 
