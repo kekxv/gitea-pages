@@ -4,13 +4,14 @@ Date: 2026-08-09 UTC
 
 Branch: `security-remediation`
 
-Commit: the containing commit, `security: close final migration and redirect findings`
+Commits: `72d4ad0` (`security: close final migration and redirect findings`) plus the containing cross-origin recovery follow-up
 
 ## Scope completed
 
 - Replaced the end-only migration manifest with a version-2 encrypted write-ahead journal.
 - Atomically rewrites the journal through a mode-0600 same-directory temporary file, then calls file `Sync`, checks `Close`, renames, opens and syncs the parent directory before every remote hook PATCH.
 - Added a SQLite transaction commit marker keyed by a random migration ID. A later invocation compensates every journaled hook and retries when the database did not commit, or finalizes the manifest without another remote mutation when the database committed.
+- Binds every compensating PATCH to that journal record's stored `GiteaAPIURL`, so changing the current migration configuration cannot redirect historical bearer or legacy hook credentials to another server.
 - Preserved version-1 manifest restore compatibility and durable final-manifest writes.
 - Made organization discovery errors abort migration. Known organization hook listing/rotation failures are skippable only with `--skip-failed-organizations`, and stderr prints the exact organization name.
 - Applied the Task-1 HTTP allowlist to `OAUTH_REDIRECT_URL`, `WEBHOOK_PUBLIC_URL`, and the migration CLI: HTTP requires `APP_ENV=development` plus `localhost`, `127.0.0.1`, `::1`, or a single-label Docker DNS host.
@@ -38,6 +39,12 @@ The transport RED run demonstrated all original findings:
 
 The corresponding focused GREEN run passed every regression.
 
+The final cross-origin recovery RED run crashed migration after server A's
+remote PATCH, then retried with server B configured. The prior implementation
+sent the compensation to B and failed later with `rotate user hook for alice:
+EOF`. The GREEN run restores the legacy hook only on A; the test cancels on
+that restore and verifies B receives zero requests and zero credentials.
+
 ## Fresh verification evidence
 
 - Focused security regressions:
@@ -49,6 +56,9 @@ The corresponding focused GREEN run passed every regression.
 - Race detector:
   - `/usr/local/go/bin/go test -count=1 -race ./...`
   - Result: `ok gitea-pages-deployer`.
+- Cross-origin recovery follow-up:
+  - `/usr/local/go/bin/go test -count=1 -run 'TestMigrationRecoveryRestoresJournaledOriginWhenConfigurationChanges|TestMigrationRecoversFromSIGKILL|TestMigrationSIGKILLHelperProcess' -v`
+  - Result: PASS; server A received the secure update plus legacy restore, and server B received no requests or credentials.
 - Release gates:
   - `bash tests/compose_security_test.sh && bash tests/nginx_test.sh && bash tests/security_release_gate_test.sh`
   - Result: exit 0; Compose policy checks passed and the built Nginx configuration reported syntax successful.

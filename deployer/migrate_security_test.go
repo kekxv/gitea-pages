@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,63 @@ func TestMigrationRecoversFromSIGKILLAtDurabilityBoundaries(t *testing.T) {
 				t.Fatalf("manifest state = %q, want %q", manifest.State, migrationManifestCompleted)
 			}
 		})
+	}
+}
+
+func TestMigrationRecoveryRestoresJournaledOriginWhenConfigurationChanges(t *testing.T) {
+	serverA := newMigrationGiteaServer(t, false, false)
+	config := seedLegacyMigration(t, serverA.URL)
+	command := exec.Command(os.Args[0], "-test.run=^TestMigrationSIGKILLHelperProcess$")
+	command.Env = append(os.Environ(),
+		"GITEA_PAGES_MIGRATION_HELPER=1",
+		"GITEA_PAGES_MIGRATION_CHECKPOINT="+string(migrationCheckpointRemotePatched),
+		"GITEA_PAGES_MIGRATION_DATABASE="+config.DatabasePath,
+		"GITEA_PAGES_MIGRATION_BACKUP="+config.BackupPath,
+		"GITEA_PAGES_MIGRATION_MANIFEST="+config.ManifestPath,
+		"GITEA_PAGES_MIGRATION_API="+config.GiteaAPIURL,
+	)
+	if err := command.Run(); err == nil {
+		t.Fatal("migration helper exited normally, want SIGKILL")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverA.setOnPatch(func(_ string, payload migrationHookPatch) {
+		if payload.Config["secret"] == "legacy-webhook-secret" {
+			cancel()
+		}
+	})
+	var serverBMu sync.Mutex
+	serverBRequests := 0
+	serverBCredentials := []string(nil)
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverBMu.Lock()
+		serverBRequests++
+		if authorization := r.Header.Get("Authorization"); authorization != "" {
+			serverBCredentials = append(serverBCredentials, authorization)
+		}
+		serverBMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer serverB.Close()
+	config.GiteaAPIURL = serverB.URL
+
+	err := RunSecurityMigration(ctx, config)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunSecurityMigration() error = %v, want cancellation after recovery compensation", err)
+	}
+	if got := serverA.patchCount("/api/v1/user/hooks/11"); got != 2 {
+		t.Fatalf("server A user hook PATCH count = %d, want secure update plus restore", got)
+	}
+	payload, ok := serverA.patch("/api/v1/user/hooks/11")
+	if !ok || payload.Config["secret"] != "legacy-webhook-secret" || payload.AuthorizationHeader != "Bearer legacy-user" {
+		t.Fatalf("server A final hook payload = %#v, %v; want restored legacy credentials", payload, ok)
+	}
+	serverBMu.Lock()
+	requests := serverBRequests
+	credentials := append([]string(nil), serverBCredentials...)
+	serverBMu.Unlock()
+	if requests != 0 || len(credentials) != 0 {
+		t.Fatalf("server B requests/credentials = %d/%q, want none during server A recovery", requests, credentials)
 	}
 }
 
@@ -486,12 +544,19 @@ type migrationGiteaServer struct {
 	disconnectNextUserPatch   bool
 	failOrganizationDiscovery bool
 	failOrganizationList      bool
+	onPatch                   func(string, migrationHookPatch)
 }
 
 func (s *migrationGiteaServer) patchCount(path string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.patchCounts[path]
+}
+
+func (s *migrationGiteaServer) setOnPatch(callback func(string, migrationHookPatch)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onPatch = callback
 }
 
 type migrationHookPatch struct {
@@ -651,5 +716,9 @@ func (s *migrationGiteaServer) recordPatch(t *testing.T, request *http.Request) 
 	s.mu.Lock()
 	s.patches[request.URL.Path] = payload
 	s.patchCounts[request.URL.Path]++
+	callback := s.onPatch
 	s.mu.Unlock()
+	if callback != nil {
+		callback(request.URL.Path, payload)
+	}
 }

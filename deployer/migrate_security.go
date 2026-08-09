@@ -616,7 +616,9 @@ func putMigrationOrganizationAuthorizer(ctx context.Context, tx *sql.Tx, organiz
 func rollbackMigratedHooks(ctx context.Context, client migrationGiteaClient, hooks []legacyHookRollbackRecord, legacySecret []byte) error {
 	var failures []error
 	for index := len(hooks) - 1; index >= 0; index-- {
-		if err := client.restoreLegacyHook(ctx, hooks[index], legacySecret); err != nil {
+		hookClient := client
+		hookClient.apiURL = hooks[index].GiteaAPIURL
+		if err := hookClient.restoreLegacyHook(ctx, hooks[index], legacySecret); err != nil {
 			failures = append(failures, err)
 		}
 	}
