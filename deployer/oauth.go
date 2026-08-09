@@ -323,7 +323,7 @@ func (h *OAuthHandler) exchangeCode(code string, redirectURL string) (*OAuthToke
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Token exchange request failed: %v", err)
@@ -364,7 +364,7 @@ func (h *OAuthHandler) getUserInfo(token string) (map[string]interface{}, error)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("User info request failed: %v", err)
@@ -409,7 +409,7 @@ func (h *OAuthHandler) refreshAccessToken(refreshToken string) (*OAuthTokenRespo
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Token refresh request failed: %v", err)
@@ -646,7 +646,7 @@ func (h *OAuthHandler) getUserOrganizations(token string) ([]string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -722,7 +722,7 @@ func (h *OAuthHandler) checkUserWebhookExists(token string) (int64, string, erro
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, "", err
@@ -759,7 +759,7 @@ func (h *OAuthHandler) checkOrgWebhookExists(token, org string) (int64, string, 
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, "", err
@@ -800,7 +800,7 @@ func (h *OAuthHandler) updateOrgWebhook(token string, org string, id int64, payl
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -837,7 +837,7 @@ func (h *OAuthHandler) updateUserWebhook(token string, id int64, payload map[str
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := secretHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -938,7 +938,7 @@ func (h *OAuthHandler) findScopedHook(token string, principal HookPrincipal) (*w
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := secretHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -997,7 +997,7 @@ func (h *OAuthHandler) sendScopedHook(token string, principal HookPrincipal, met
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := secretHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1020,7 +1020,7 @@ func (h *OAuthHandler) rollbackScopedHook(token string, principal HookPrincipal,
 			return err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		resp, err := secretHTTPClient().Do(req)
 		if err != nil {
 			return err
 		}

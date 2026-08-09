@@ -6,6 +6,7 @@
 
 services:
   nginx:
+    image: ghcr.io/kekxv/gitea-pages/nginx:latest
     build:
       context: ./nginx
       args:
@@ -37,6 +38,7 @@ services:
       - pages_backend
 
   deployer:
+    image: ghcr.io/kekxv/gitea-pages/deployer:latest
     build:
       context: ./deployer
       args:

@@ -87,10 +87,10 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("invalid GITEA_PUBLIC_URL: %w", err)
 		}
 	}
-	if err := validateOptionalHTTPURL("OAUTH_REDIRECT_URL", os.Getenv("OAUTH_REDIRECT_URL")); err != nil {
+	if err := validateOptionalPublicURL("OAUTH_REDIRECT_URL", os.Getenv("OAUTH_REDIRECT_URL"), appEnv); err != nil {
 		return nil, err
 	}
-	if err := validateOptionalHTTPURL("WEBHOOK_PUBLIC_URL", os.Getenv("WEBHOOK_PUBLIC_URL")); err != nil {
+	if err := validateOptionalPublicURL("WEBHOOK_PUBLIC_URL", os.Getenv("WEBHOOK_PUBLIC_URL"), appEnv); err != nil {
 		return nil, err
 	}
 
@@ -176,25 +176,26 @@ func loadOAuthClientSecret(clientID, path, legacyValue string) (string, error) {
 }
 
 func validateGiteaURL(rawURL, appEnv string) error {
+	return validateConfiguredURL("GITEA_API_URL", rawURL, appEnv, true)
+}
+
+func validateOptionalPublicURL(name, rawURL, appEnv string) error {
+	return validateConfiguredURL(name, rawURL, appEnv, false)
+}
+
+func validateConfiguredURL(name, rawURL, appEnv string, required bool) error {
 	if rawURL == "" {
-		return errors.New("GITEA_API_URL is required")
+		if required {
+			return fmt.Errorf("%s is required", name)
+		}
+		return nil
 	}
 	parsed, err := parseHTTPURL(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid GITEA_API_URL: %w", err)
+		return fmt.Errorf("invalid %s: %w", name, err)
 	}
 	if parsed.Scheme == "http" && (appEnv != "development" || !isLocalDevelopmentHost(parsed.Hostname())) {
-		return errors.New("GITEA_API_URL must use HTTPS outside local development")
-	}
-	return nil
-}
-
-func validateOptionalHTTPURL(name, rawURL string) error {
-	if rawURL == "" {
-		return nil
-	}
-	if _, err := parseHTTPURL(rawURL); err != nil {
-		return fmt.Errorf("invalid %s: %w", name, err)
+		return fmt.Errorf("%s must use HTTPS outside local development", name)
 	}
 	return nil
 }

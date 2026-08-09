@@ -1,11 +1,36 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestGitCloneDisablesInitialHTTPRedirects(t *testing.T) {
+	gitBinary := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+redirects_disabled=false
+for argument in "$@"; do
+  if [ "$argument" = "http.followRedirects=false" ]; then
+    redirects_disabled=true
+  fi
+  if [ "$argument" = "clone" ]; then
+    [ "$redirects_disabled" = "true" ] && exit 0
+    exit 42
+  fi
+done
+exit 43
+`
+	if err := os.WriteFile(gitBinary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cloneURL := mustHTTPSURL(t, "https://gitea.example.com/alice/site.git")
+	if err := runGitClone(context.Background(), gitBinary, cloneURL, filepath.Join(t.TempDir(), "repository"), ""); err != nil {
+		t.Fatalf("runGitClone() error = %v, want redirects disabled before clone", err)
+	}
+}
 
 // This would fail if a set-ID or sticky checkout entry were normalized and
 // published instead of rejected before it reaches staging.

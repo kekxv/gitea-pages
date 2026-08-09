@@ -35,7 +35,8 @@ curl -O https://raw.githubusercontent.com/kekxv/gitea-pages/main/.env.example
 cp .env.example .env
 # Edit .env with your settings
 
-# Create the three secret files described in .env.example, then pull and run.
+# The Compose file names GHCR images, so this path does not need the source
+# build contexts. Create the three secret files, then pull and run.
 docker compose pull
 docker compose up -d
 ```
@@ -236,7 +237,6 @@ gitea-pages/
 │   ├── gitea.go           # Gitea API client
 │   ├── oauth.go           # OAuth2 handler
 │   ├── web.go             # Web UI
-│   ├── auto_register.go   # Auto webhook registration
 │   └── security.go        # Security utilities
 └── examples/quickstart/   # Hardened deployment guide
 ```
@@ -283,7 +283,7 @@ curl -O https://raw.githubusercontent.com/kekxv/gitea-pages/main/.env.example
 cp .env.example .env
 # 编辑 .env 填入你的配置
 
-# 拉取并运行
+# Compose 文件已指定 GHCR 镜像，此流程不需要源码构建上下文；拉取并运行
 docker compose pull
 docker compose up -d
 ```
@@ -436,7 +436,6 @@ gitea-pages/
 │   ├── gitea.go           # Gitea API 客户端
 │   ├── oauth.go           # OAuth2 处理
 │   ├── web.go             # Web UI
-│   ├── auto_register.go   # 自动注册 webhook
 │   └── security.go        # 安全工具函数
 └── examples/quickstart/   # 安全部署指南
 ```

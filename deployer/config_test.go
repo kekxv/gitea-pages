@@ -106,6 +106,58 @@ func TestLoadConfigRejectsNonExactLoopbackGiteaHost(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsHTTPPublicURLsInProduction(t *testing.T) {
+	for _, variable := range []string{"OAUTH_REDIRECT_URL", "WEBHOOK_PUBLIC_URL"} {
+		t.Run(variable, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("APP_ENV", "production")
+			t.Setenv("GITEA_API_URL", "https://gitea.example.com")
+			t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+			t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
+			t.Setenv("OAUTH_REDIRECT_URL", "")
+			t.Setenv("WEBHOOK_PUBLIC_URL", "")
+			t.Setenv(variable, "http://localhost:8080/path")
+
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), variable+" must use HTTPS outside local development") {
+				t.Fatalf("LoadConfig() error = %v, want production HTTP rejection for %s", err, variable)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAllowsHTTPPublicURLsOnlyOnExactDevelopmentHosts(t *testing.T) {
+	for _, host := range []string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080", "deployer:8080"} {
+		t.Run("allow_"+host, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("APP_ENV", "development")
+			t.Setenv("GITEA_API_URL", "http://gitea:3000")
+			t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+			t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
+			t.Setenv("OAUTH_REDIRECT_URL", "http://"+host+"/oauth/callback")
+			t.Setenv("WEBHOOK_PUBLIC_URL", "http://"+host+"/webhook")
+
+			if _, err := LoadConfig(); err != nil {
+				t.Fatalf("LoadConfig() error = %v, want exact development host %s accepted", err, host)
+			}
+		})
+	}
+	for _, host := range []string{"127.0.0.2:8080", "pages.localhost:8080", "deployer.example:8080"} {
+		t.Run("reject_"+host, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("APP_ENV", "development")
+			t.Setenv("GITEA_API_URL", "http://gitea:3000")
+			t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+			t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)))
+			t.Setenv("OAUTH_REDIRECT_URL", "http://"+host+"/oauth/callback")
+			t.Setenv("WEBHOOK_PUBLIC_URL", "https://pages.example.com/webhook")
+
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("LoadConfig accepted disallowed development host %s", host)
+			}
+		})
+	}
+}
+
 func TestLoadConfigEnablesOrganizationHooksByDefault(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("APP_ENV", "production")

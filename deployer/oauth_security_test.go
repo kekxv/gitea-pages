@@ -355,6 +355,37 @@ func TestExchangeCodeUsesEncodedFormAndConfiguredRedirect(t *testing.T) {
 	}
 }
 
+func TestOAuthTokenExchangeRejectsRedirectBeforeClientSecretDisclosure(t *testing.T) {
+	targetCalled := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalled = true
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse redirected token form: %v", err)
+		}
+		if secret := r.Form.Get("client_secret"); secret != "" {
+			t.Errorf("redirect target received client_secret %q", secret)
+		}
+		_ = json.NewEncoder(w).Encode(OAuthTokenResponse{AccessToken: "redirected-token"})
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/token", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	handler := NewOAuthHandler(&OAuthConfig{
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		TokenURL:     redirector.URL + "/login/oauth/access_token",
+	}, nil, "https://pages.example.com/webhook", "session-secret")
+	if _, err := handler.exchangeCode("authorization-code", "https://pages.example.com/oauth/callback"); err == nil {
+		t.Fatal("exchangeCode followed a token endpoint redirect")
+	}
+	if targetCalled {
+		t.Fatal("OAuth client-secret redirect target was contacted")
+	}
+}
+
 func TestRefreshAccessTokenUsesEncodedForm(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

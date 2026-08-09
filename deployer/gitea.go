@@ -59,12 +59,7 @@ func (c *GiteaClient) GetRepoInfoContext(ctx context.Context, owner, repo string
 
 	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return ErrUntrustedRepositoryAPI
-		},
-	}
+	client := noRedirectHTTPClient(nil, 10*time.Second, ErrUntrustedRepositoryAPI)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("API request failed: %w", err)

@@ -5,14 +5,105 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestMigrationRecoversFromSIGKILLAtDurabilityBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		checkpoint             migrationCheckpoint
+		wantUserHookPatchCount int
+	}{
+		{name: "journal synced before PATCH", checkpoint: migrationCheckpointJournalSynced, wantUserHookPatchCount: 2},
+		{name: "remote PATCH applied", checkpoint: migrationCheckpointRemotePatched, wantUserHookPatchCount: 3},
+		{name: "database committed", checkpoint: migrationCheckpointDatabaseCommitted, wantUserHookPatchCount: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newMigrationGiteaServer(t, false, false)
+			config := seedLegacyMigration(t, server.URL)
+
+			command := exec.Command(os.Args[0], "-test.run=^TestMigrationSIGKILLHelperProcess$")
+			command.Env = append(os.Environ(),
+				"GITEA_PAGES_MIGRATION_HELPER=1",
+				"GITEA_PAGES_MIGRATION_CHECKPOINT="+string(test.checkpoint),
+				"GITEA_PAGES_MIGRATION_DATABASE="+config.DatabasePath,
+				"GITEA_PAGES_MIGRATION_BACKUP="+config.BackupPath,
+				"GITEA_PAGES_MIGRATION_MANIFEST="+config.ManifestPath,
+				"GITEA_PAGES_MIGRATION_API="+config.GiteaAPIURL,
+			)
+			if err := command.Run(); err == nil {
+				t.Fatal("migration helper exited normally, want SIGKILL")
+			} else if exit, ok := err.(*exec.ExitError); !ok || exit.Success() {
+				t.Fatalf("migration helper error = %v, want killed process", err)
+			}
+
+			if _, err := os.Stat(config.ManifestPath); err != nil {
+				t.Fatalf("durable migration journal after SIGKILL: %v", err)
+			}
+			if err := RunSecurityMigration(context.Background(), config); err != nil {
+				t.Fatalf("recover migration after SIGKILL: %v", err)
+			}
+			assertHookCredentialCount(t, config.DatabasePath, 2)
+			if got := server.patchCount("/api/v1/user/hooks/11"); got != test.wantUserHookPatchCount {
+				t.Fatalf("user hook PATCH count = %d, want %d", got, test.wantUserHookPatchCount)
+			}
+
+			cipher, err := NewTokenCipher(config.TokenEncryptionKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := readEncryptedMigrationManifest(config.ManifestPath, cipher)
+			if err != nil {
+				t.Fatalf("read finalized manifest: %v", err)
+			}
+			if manifest.State != migrationManifestCompleted {
+				t.Fatalf("manifest state = %q, want %q", manifest.State, migrationManifestCompleted)
+			}
+		})
+	}
+}
+
+func TestMigrationSIGKILLHelperProcess(t *testing.T) {
+	if os.Getenv("GITEA_PAGES_MIGRATION_HELPER") != "1" {
+		return
+	}
+	checkpoint := migrationCheckpoint(os.Getenv("GITEA_PAGES_MIGRATION_CHECKPOINT"))
+	config := SecurityMigrationConfig{
+		DatabasePath:        os.Getenv("GITEA_PAGES_MIGRATION_DATABASE"),
+		BackupPath:          os.Getenv("GITEA_PAGES_MIGRATION_BACKUP"),
+		ManifestPath:        os.Getenv("GITEA_PAGES_MIGRATION_MANIFEST"),
+		TokenEncryptionKey:  bytes.Repeat([]byte("k"), 32),
+		LegacyWebhookSecret: []byte("legacy-webhook-secret"),
+		GiteaAPIURL:         os.Getenv("GITEA_PAGES_MIGRATION_API"),
+		WebhookURL:          "https://pages.example.com/webhook",
+		AppEnv:              "development",
+		checkpoint: func(reached migrationCheckpoint) {
+			if reached != checkpoint {
+				return
+			}
+			process, err := os.FindProcess(os.Getpid())
+			if err != nil {
+				panic(err)
+			}
+			if err := process.Kill(); err != nil {
+				panic(err)
+			}
+			select {}
+		},
+	}
+	if err := RunSecurityMigration(context.Background(), config); err != nil {
+		t.Fatalf("RunSecurityMigration helper error = %v", err)
+	}
+}
 
 func TestMigrationRollsBackDatabaseWhenUserHookRotationFails(t *testing.T) {
 	server := newMigrationGiteaServer(t, true, false)
@@ -62,6 +153,17 @@ func TestMigrationEncryptsTokensRotatesUserAndOrganizationHooksAndHidesSecrets(t
 	if info, err := os.Stat(config.ManifestPath); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("manifest permissions = %v, %v; want 0600", info.Mode(), err)
 	}
+	cipher, err := NewTokenCipher(config.TokenEncryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := readEncryptedMigrationManifest(config.ManifestPath, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.State != migrationManifestCompleted {
+		t.Fatalf("manifest state = %q, want completed", decoded.State)
+	}
 }
 
 func TestMigrationRequiresProtectedExistingBackup(t *testing.T) {
@@ -73,6 +175,57 @@ func TestMigrationRequiresProtectedExistingBackup(t *testing.T) {
 
 	if err := RunSecurityMigration(context.Background(), config); err == nil || !strings.Contains(err.Error(), "0600") {
 		t.Fatalf("RunSecurityMigration() error = %v, want backup mode rejection", err)
+	}
+	assertLegacyTokenRowExists(t, config.DatabasePath, "alice")
+}
+
+func TestMigrationRejectsHTTPWebhookURLInProduction(t *testing.T) {
+	server := newMigrationGiteaServer(t, false, false)
+	config := seedLegacyMigration(t, server.URL)
+	config.AppEnv = "production"
+	config.GiteaAPIURL = "https://gitea.example.com"
+	config.WebhookURL = "http://localhost:8080/webhook"
+
+	err := RunSecurityMigration(context.Background(), config)
+	if err == nil || !strings.Contains(err.Error(), "WEBHOOK_PUBLIC_URL must use HTTPS outside local development") {
+		t.Fatalf("RunSecurityMigration() error = %v, want production HTTP webhook rejection", err)
+	}
+	assertLegacyTokenRowExists(t, config.DatabasePath, "alice")
+}
+
+func TestMigrationDoesNotFollowRedirectWithBearerToken(t *testing.T) {
+	var targetMu sync.Mutex
+	targetCalled := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetMu.Lock()
+		targetCalled = true
+		targetMu.Unlock()
+		if authorization := r.Header.Get("Authorization"); authorization != "" {
+			t.Errorf("redirect target received Authorization %q", authorization)
+		}
+		_ = json.NewEncoder(w).Encode([]webhookInfo{})
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/user/hooks" {
+			http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]string{})
+	}))
+	defer redirector.Close()
+	config := seedLegacyMigration(t, redirector.URL)
+	config.AppEnv = "development"
+
+	err := RunSecurityMigration(context.Background(), config)
+	if err == nil {
+		t.Fatal("RunSecurityMigration followed a bearer-token redirect")
+	}
+	targetMu.Lock()
+	called := targetCalled
+	targetMu.Unlock()
+	if called {
+		t.Fatal("bearer-token redirect target was contacted")
 	}
 	assertLegacyTokenRowExists(t, config.DatabasePath, "alice")
 }
@@ -105,12 +258,21 @@ func TestMigrationPreservesLegacyRowsWhenOptionalTokenColumnsAreAbsent(t *testin
 }
 
 func TestMigrationCanSkipFailedOrganizationButNamesIt(t *testing.T) {
-	server := newMigrationGiteaServer(t, false, true)
+	server := newMigrationGiteaServer(t, false, false)
+	server.failOrganizationList = true
 	config := seedLegacyMigration(t, server.URL)
 	config.SkipFailedOrganizations = true
 
-	if err := RunSecurityMigration(context.Background(), config); err != nil {
-		t.Fatalf("RunSecurityMigration() error = %v", err)
+	stderr := captureMigrationStderr(t, func() {
+		if err := RunSecurityMigration(context.Background(), config); err != nil {
+			t.Fatalf("RunSecurityMigration() error = %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "organization engineering was not migrated") {
+		t.Fatalf("migration stderr = %q, want exact skipped organization name", stderr)
+	}
+	if strings.Contains(stderr, "organization unknown") {
+		t.Fatalf("migration stderr used a placeholder organization: %q", stderr)
 	}
 	check, err := sql.Open("sqlite", config.DatabasePath)
 	if err != nil {
@@ -124,6 +286,46 @@ func TestMigrationCanSkipFailedOrganizationButNamesIt(t *testing.T) {
 	if hooks != 1 {
 		t.Fatalf("migrated hooks = %d, want user hook only", hooks)
 	}
+}
+
+func TestMigrationAbortsWhenOrganizationDiscoveryFails(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run("skip="+strconv.FormatBool(skip), func(t *testing.T) {
+			server := newMigrationGiteaServer(t, false, false)
+			server.failOrganizationDiscovery = true
+			config := seedLegacyMigration(t, server.URL)
+			config.SkipFailedOrganizations = skip
+
+			err := RunSecurityMigration(context.Background(), config)
+			if err == nil || !strings.Contains(err.Error(), "discover organizations for alice") {
+				t.Fatalf("RunSecurityMigration() error = %v, want named discovery failure", err)
+			}
+			assertLegacyTokenRowExists(t, config.DatabasePath, "alice")
+		})
+	}
+}
+
+func captureMigrationStderr(t *testing.T, action func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+	defer func() { os.Stderr = oldStderr }()
+	action()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
 }
 
 func TestMigrationPaginatesUserOrganizationAndHookLists(t *testing.T) {
@@ -224,6 +426,7 @@ func seedLegacyMigration(t *testing.T, apiURL string) SecurityMigrationConfig {
 		LegacyWebhookSecret: []byte("legacy-webhook-secret"),
 		GiteaAPIURL:         apiURL,
 		WebhookURL:          "https://pages.example.com/webhook",
+		AppEnv:              "development",
 	}
 }
 
@@ -277,9 +480,18 @@ func assertHookCredentialCount(t *testing.T, dbPath string, want int) {
 
 type migrationGiteaServer struct {
 	*httptest.Server
-	mu                      sync.Mutex
-	patches                 map[string]migrationHookPatch
-	disconnectNextUserPatch bool
+	mu                        sync.Mutex
+	patches                   map[string]migrationHookPatch
+	patchCounts               map[string]int
+	disconnectNextUserPatch   bool
+	failOrganizationDiscovery bool
+	failOrganizationList      bool
+}
+
+func (s *migrationGiteaServer) patchCount(path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.patchCounts[path]
 }
 
 type migrationHookPatch struct {
@@ -306,7 +518,7 @@ func (s *migrationGiteaServer) takeUserPatchDisconnect() bool {
 
 func newMigrationGiteaServer(t *testing.T, failUserPatch, failOrganizationPatch bool) *migrationGiteaServer {
 	t.Helper()
-	server := &migrationGiteaServer{patches: make(map[string]migrationHookPatch)}
+	server := &migrationGiteaServer{patches: make(map[string]migrationHookPatch), patchCounts: make(map[string]int)}
 	t.Cleanup(func() { server.Close() })
 	legacyHook := func(id int64, authorizationHeader string) webhookInfo {
 		return webhookInfo{ID: id, Type: "gitea", Config: webhookConfig{URL: "https://pages.example.com/webhook", ContentType: "json", Secret: "legacy-webhook-secret"}, Events: []string{"push", "delete"}, Active: true, BranchFilter: "gh-pages", AuthorizationHeader: authorizationHeader}
@@ -321,12 +533,20 @@ func newMigrationGiteaServer(t *testing.T, failUserPatch, failOrganizationPatch 
 			}
 			_ = json.NewEncoder(w).Encode([]webhookInfo{legacyHook(11, "Bearer legacy-user")})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/orgs":
+			if server.failOrganizationDiscovery {
+				http.Error(w, "organization discovery unavailable", http.StatusBadGateway)
+				return
+			}
 			if page != "" && page != "1" {
 				_ = json.NewEncoder(w).Encode([]map[string]string{})
 				return
 			}
 			_ = json.NewEncoder(w).Encode([]map[string]string{{"username": "engineering"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/orgs/engineering/hooks":
+			if server.failOrganizationList {
+				http.Error(w, "organization hooks unavailable", http.StatusBadGateway)
+				return
+			}
 			if page != "" && page != "1" {
 				_ = json.NewEncoder(w).Encode([]webhookInfo{})
 				return
@@ -364,7 +584,7 @@ func newMigrationGiteaServer(t *testing.T, failUserPatch, failOrganizationPatch 
 
 func newPaginatedMigrationGiteaServer(t *testing.T) *migrationGiteaServer {
 	t.Helper()
-	server := &migrationGiteaServer{patches: make(map[string]migrationHookPatch)}
+	server := &migrationGiteaServer{patches: make(map[string]migrationHookPatch), patchCounts: make(map[string]int)}
 	t.Cleanup(func() { server.Close() })
 	legacyHook := func(id int64, authorizationHeader string) webhookInfo {
 		return webhookInfo{ID: id, Type: "gitea", Config: webhookConfig{URL: "https://pages.example.com/webhook", ContentType: "json", Secret: "legacy-webhook-secret"}, Events: []string{"push", "delete"}, Active: true, BranchFilter: "gh-pages", AuthorizationHeader: authorizationHeader}
@@ -430,5 +650,6 @@ func (s *migrationGiteaServer) recordPatch(t *testing.T, request *http.Request) 
 	}
 	s.mu.Lock()
 	s.patches[request.URL.Path] = payload
+	s.patchCounts[request.URL.Path]++
 	s.mu.Unlock()
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -18,7 +19,7 @@ import (
 	"time"
 )
 
-const securityMigrationManifestVersion = 1
+const securityMigrationManifestVersion = 2
 
 const migrationGiteaPageLimit = 100
 
@@ -33,8 +34,10 @@ type SecurityMigrationConfig struct {
 	LegacyWebhookSecret     []byte
 	GiteaAPIURL             string
 	WebhookURL              string
+	AppEnv                  string
 	SkipFailedOrganizations bool
 	HTTPClient              *http.Client
+	checkpoint              func(migrationCheckpoint)
 }
 
 // LegacyHookRestoreConfig contains the minimum inputs required to restore
@@ -47,10 +50,27 @@ type LegacyHookRestoreConfig struct {
 }
 
 type securityMigrationManifest struct {
-	Version   int                        `json:"version"`
-	CreatedAt time.Time                  `json:"created_at"`
-	Hooks     []legacyHookRollbackRecord `json:"hooks"`
+	Version     int                        `json:"version"`
+	MigrationID string                     `json:"migration_id,omitempty"`
+	State       migrationManifestState     `json:"state,omitempty"`
+	CreatedAt   time.Time                  `json:"created_at"`
+	Hooks       []legacyHookRollbackRecord `json:"hooks"`
 }
+
+type migrationManifestState string
+
+const (
+	migrationManifestInProgress migrationManifestState = "in_progress"
+	migrationManifestCompleted  migrationManifestState = "completed"
+)
+
+type migrationCheckpoint string
+
+const (
+	migrationCheckpointJournalSynced     migrationCheckpoint = "journal_synced"
+	migrationCheckpointRemotePatched     migrationCheckpoint = "remote_patched"
+	migrationCheckpointDatabaseCommitted migrationCheckpoint = "database_committed"
+)
 
 // legacyHookRollbackRecord intentionally excludes the legacy secret. Restore
 // obtains that value only from LEGACY_WEBHOOK_SECRET_FILE at execution time.
@@ -71,8 +91,9 @@ type legacyHookRollbackRecord struct {
 }
 
 // RunSecurityMigration rotates legacy hooks and converts v1 plaintext token
-// rows in one SQLite transaction. External hook changes are reversed in-memory
-// if a required migration step fails before commit.
+// rows in one SQLite transaction. Its encrypted write-ahead journal is synced
+// before every remote mutation so a later invocation can recover after an
+// uncatchable process or host failure.
 func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (err error) {
 	if err := validateSecurityMigrationConfig(config); err != nil {
 		return err
@@ -86,6 +107,15 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 		return err
 	}
 	defer db.Close()
+	client := migrationGiteaClient{apiURL: strings.TrimSuffix(config.GiteaAPIURL, "/"), httpClient: config.HTTPClient}
+	client.httpClient = noRedirectHTTPClient(client.httpClient, 10*time.Second, ErrSecretHTTPRedirect)
+	recovered, err := recoverInterruptedSecurityMigration(ctx, db, client, config, cipher)
+	if err != nil {
+		return err
+	}
+	if recovered {
+		return nil
+	}
 
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -93,6 +123,9 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 	}
 	defer tx.Rollback()
 	if err := createSecureStorageSchema(ctx, tx); err != nil {
+		return err
+	}
+	if err := createSecurityMigrationCommitSchema(ctx, tx); err != nil {
 		return err
 	}
 
@@ -104,16 +137,24 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 	if err != nil {
 		return err
 	}
-	client := migrationGiteaClient{apiURL: strings.TrimSuffix(config.GiteaAPIURL, "/"), httpClient: config.HTTPClient}
-	if client.httpClient == nil {
-		client.httpClient = &http.Client{Timeout: 10 * time.Second}
+	migrationID, err := newSecurityMigrationID()
+	if err != nil {
+		return err
+	}
+	manifest := securityMigrationManifest{
+		Version: securityMigrationManifestVersion, MigrationID: migrationID, State: migrationManifestInProgress, CreatedAt: time.Now().UTC(),
+	}
+	if err := writeEncryptedMigrationManifest(config.ManifestPath, cipher, manifest); err != nil {
+		return err
 	}
 
-	var updated []legacyHookRollbackRecord
 	fail := func(cause error) error {
-		rollbackErr := rollbackMigratedHooks(ctx, client, updated, config.LegacyWebhookSecret)
+		rollbackErr := rollbackMigratedHooks(ctx, client, manifest.Hooks, config.LegacyWebhookSecret)
 		if rollbackErr != nil {
 			return fmt.Errorf("%w; Gitea hook rollback failed: %v", cause, rollbackErr)
+		}
+		if removeErr := removeDurableMigrationManifest(config.ManifestPath); removeErr != nil {
+			return fmt.Errorf("%w; remove compensated migration journal: %v", cause, removeErr)
 		}
 		return cause
 	}
@@ -126,14 +167,15 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 			return fail(fmt.Errorf("encrypt token for %s: %w", token.Username, err))
 		}
 		principal := HookPrincipal{Username: token.Username, ScopeType: ScopeUser, ScopeName: token.Username}
-		rotated, err := rotateLegacyHooks(ctx, tx, client, config, token.AccessToken, principal)
-		if err != nil {
+		if _, err := rotateLegacyHooks(ctx, tx, client, config, cipher, &manifest, token.AccessToken, principal); err != nil {
 			return fail(fmt.Errorf("rotate user hook for %s: %w", token.Username, err))
 		}
-		updated = append(updated, rotated...)
 	}
 
-	organizations := discoverMigrationOrganizations(ctx, client, users, authorizers)
+	organizations, err := discoverMigrationOrganizations(ctx, client, users, authorizers)
+	if err != nil {
+		return fail(err)
+	}
 	for _, organization := range sortedKeys(organizations) {
 		candidates := organizations[organization]
 		var rotateErr error
@@ -147,7 +189,7 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 			}
 			attempted = true
 			principal = HookPrincipal{Username: username, ScopeType: ScopeOrganization, ScopeName: organization}
-			rotated, rotateErr = rotateLegacyHooks(ctx, tx, client, config, token.AccessToken, principal)
+			rotated, rotateErr = rotateLegacyHooks(ctx, tx, client, config, cipher, &manifest, token.AccessToken, principal)
 			if rotateErr == nil {
 				break
 			}
@@ -162,7 +204,6 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 			}
 			return fail(fmt.Errorf("rotate organization hook for %s: %w", organization, rotateErr))
 		}
-		updated = append(updated, rotated...)
 		if len(rotated) == 0 {
 			continue
 		}
@@ -179,17 +220,27 @@ func RunSecurityMigration(ctx context.Context, config SecurityMigrationConfig) (
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS user_tokens`); err != nil {
 		return fail(fmt.Errorf("remove plaintext user tokens: %w", err))
 	}
-	if err := writeEncryptedMigrationManifest(config.ManifestPath, cipher, securityMigrationManifest{
-		Version: securityMigrationManifestVersion, CreatedAt: time.Now().UTC(), Hooks: updated,
-	}); err != nil {
-		return fail(err)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO security_migration_commits (migration_id, committed_at) VALUES (?, ?)`, manifest.MigrationID, time.Now().UTC()); err != nil {
+		return fail(fmt.Errorf("record security migration commit: %w", err))
 	}
-	manifestWritten := true
 	if err := tx.Commit(); err != nil {
-		if manifestWritten {
-			_ = os.Remove(config.ManifestPath)
+		committed, inspectErr := securityMigrationCommitted(ctx, db, manifest.MigrationID)
+		if inspectErr != nil {
+			return fmt.Errorf("commit security migration: %w; preserve migration journal because commit status could not be inspected: %v", err, inspectErr)
+		}
+		if committed {
+			manifest.State = migrationManifestCompleted
+			if writeErr := writeEncryptedMigrationManifest(config.ManifestPath, cipher, manifest); writeErr != nil {
+				return fmt.Errorf("finalize committed migration manifest: %w", writeErr)
+			}
+			return nil
 		}
 		return fail(fmt.Errorf("commit security migration: %w", err))
+	}
+	reachMigrationCheckpoint(config, migrationCheckpointDatabaseCommitted)
+	manifest.State = migrationManifestCompleted
+	if err := writeEncryptedMigrationManifest(config.ManifestPath, cipher, manifest); err != nil {
+		return fmt.Errorf("finalize committed migration manifest: %w", err)
 	}
 	return nil
 }
@@ -225,18 +276,95 @@ func validateSecurityMigrationConfig(config SecurityMigrationConfig) error {
 	if len(config.LegacyWebhookSecret) == 0 {
 		return errors.New("legacy webhook secret is required")
 	}
-	if _, err := parseHTTPURL(config.GiteaAPIURL); err != nil {
-		return fmt.Errorf("invalid Gitea API URL: %w", err)
+	if err := validateConfiguredURL("GITEA_API_URL", config.GiteaAPIURL, config.AppEnv, true); err != nil {
+		return err
 	}
-	if _, err := parseHTTPURL(config.WebhookURL); err != nil {
-		return fmt.Errorf("invalid webhook URL: %w", err)
+	if err := validateConfiguredURL("WEBHOOK_PUBLIC_URL", config.WebhookURL, config.AppEnv, true); err != nil {
+		return err
 	}
-	if _, err := os.Stat(config.ManifestPath); err == nil {
-		return fmt.Errorf("rollback manifest already exists: %s", config.ManifestPath)
-	} else if !os.IsNotExist(err) {
+	if _, err := os.Lstat(config.ManifestPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("inspect rollback manifest path: %w", err)
 	}
 	return nil
+}
+
+func newSecurityMigrationID() (string, error) {
+	value := make([]byte, 24)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate security migration ID: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func reachMigrationCheckpoint(config SecurityMigrationConfig, checkpoint migrationCheckpoint) {
+	if config.checkpoint != nil {
+		config.checkpoint(checkpoint)
+	}
+}
+
+func createSecurityMigrationCommitSchema(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS security_migration_commits (
+		migration_id TEXT PRIMARY KEY,
+		committed_at DATETIME NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("create security migration commit schema: %w", err)
+	}
+	return nil
+}
+
+func securityMigrationCommitted(ctx context.Context, db *sql.DB, migrationID string) (bool, error) {
+	if migrationID == "" {
+		return false, nil
+	}
+	var tableExists int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'security_migration_commits')`).Scan(&tableExists); err != nil {
+		return false, fmt.Errorf("inspect security migration commit schema: %w", err)
+	}
+	if tableExists == 0 {
+		return false, nil
+	}
+	var committed int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM security_migration_commits WHERE migration_id = ?)`, migrationID).Scan(&committed); err != nil {
+		return false, fmt.Errorf("inspect security migration commit: %w", err)
+	}
+	return committed == 1, nil
+}
+
+func recoverInterruptedSecurityMigration(ctx context.Context, db *sql.DB, client migrationGiteaClient, config SecurityMigrationConfig, cipher *TokenCipher) (bool, error) {
+	if _, err := os.Lstat(config.ManifestPath); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("inspect rollback manifest: %w", err)
+	}
+	manifest, err := readEncryptedMigrationManifest(config.ManifestPath, cipher)
+	if err != nil {
+		return false, err
+	}
+	if manifest.State == migrationManifestCompleted {
+		return false, fmt.Errorf("rollback manifest already exists: %s", config.ManifestPath)
+	}
+	if manifest.State != migrationManifestInProgress || manifest.MigrationID == "" {
+		return false, errors.New("rollback manifest does not contain a recoverable in-progress migration")
+	}
+	committed, err := securityMigrationCommitted(ctx, db, manifest.MigrationID)
+	if err != nil {
+		return false, err
+	}
+	if committed {
+		manifest.State = migrationManifestCompleted
+		if err := writeEncryptedMigrationManifest(config.ManifestPath, cipher, manifest); err != nil {
+			return false, fmt.Errorf("finalize recovered migration manifest: %w", err)
+		}
+		return true, nil
+	}
+	if err := rollbackMigratedHooks(ctx, client, manifest.Hooks, config.LegacyWebhookSecret); err != nil {
+		return false, fmt.Errorf("compensate interrupted security migration: %w", err)
+	}
+	if err := removeDurableMigrationManifest(config.ManifestPath); err != nil {
+		return false, fmt.Errorf("remove compensated migration journal: %w", err)
+	}
+	return false, nil
 }
 
 func openMigrationDatabase(path string) (*sql.DB, error) {
@@ -366,7 +494,7 @@ func migrationOrganizationAuthorizers(ctx context.Context, tx *sql.Tx) (map[stri
 	return result, rows.Err()
 }
 
-func discoverMigrationOrganizations(ctx context.Context, client migrationGiteaClient, users map[string]UserToken, retained map[string][]string) map[string][]string {
+func discoverMigrationOrganizations(ctx context.Context, client migrationGiteaClient, users map[string]UserToken, retained map[string][]string) (map[string][]string, error) {
 	organizations := make(map[string][]string, len(retained))
 	for organization, usernames := range retained {
 		organizations[organization] = append([]string(nil), usernames...)
@@ -374,13 +502,13 @@ func discoverMigrationOrganizations(ctx context.Context, client migrationGiteaCl
 	for _, username := range sortedKeys(users) {
 		names, err := client.organizations(ctx, users[username].AccessToken)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("discover organizations for %s: %w", username, err)
 		}
 		for _, organization := range names {
 			organizations[organization] = appendUnique(organizations[organization], username)
 		}
 	}
-	return organizations
+	return organizations, nil
 }
 
 func sortedKeys[V any](values map[string]V) []string {
@@ -401,7 +529,7 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
-func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaClient, config SecurityMigrationConfig, accessToken string, principal HookPrincipal) ([]legacyHookRollbackRecord, error) {
+func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaClient, config SecurityMigrationConfig, cipher *TokenCipher, manifest *securityMigrationManifest, accessToken string, principal HookPrincipal) ([]legacyHookRollbackRecord, error) {
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT rotate_legacy_hooks`); err != nil {
 		return nil, err
 	}
@@ -411,12 +539,16 @@ func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaCli
 		_, _ = tx.ExecContext(ctx, `RELEASE SAVEPOINT rotate_legacy_hooks`)
 		return nil, err
 	}
-	var records []legacyHookRollbackRecord
+	journalStart := len(manifest.Hooks)
 	fail := func(cause error) ([]legacyHookRollbackRecord, error) {
 		_, localRollbackErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT rotate_legacy_hooks`)
 		_, localReleaseErr := tx.ExecContext(ctx, `RELEASE SAVEPOINT rotate_legacy_hooks`)
-		if rollbackErr := rollbackMigratedHooks(ctx, client, records, config.LegacyWebhookSecret); rollbackErr != nil {
+		if rollbackErr := rollbackMigratedHooks(ctx, client, manifest.Hooks[journalStart:], config.LegacyWebhookSecret); rollbackErr != nil {
 			return nil, fmt.Errorf("%w; restore partially rotated hooks: %v; local rollback: %v", cause, rollbackErr, errors.Join(localRollbackErr, localReleaseErr))
+		}
+		manifest.Hooks = manifest.Hooks[:journalStart]
+		if journalErr := writeEncryptedMigrationManifest(config.ManifestPath, cipher, *manifest); journalErr != nil {
+			return nil, fmt.Errorf("%w; truncate compensated migration journal: %v", cause, journalErr)
 		}
 		if localRollbackErr != nil || localReleaseErr != nil {
 			return nil, fmt.Errorf("%w; roll back local hook credentials: %v", cause, errors.Join(localRollbackErr, localReleaseErr))
@@ -440,10 +572,15 @@ func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaCli
 			GiteaHookID: hook.ID, URL: hook.Config.URL, ContentType: hook.Config.ContentType, Events: hook.Events,
 			Active: hook.Active, BranchFilter: hook.BranchFilter, AuthorizationHeader: hook.AuthorizationHeader,
 		}
-		records = append(records, record)
+		manifest.Hooks = append(manifest.Hooks, record)
+		if err := writeEncryptedMigrationManifest(config.ManifestPath, cipher, *manifest); err != nil {
+			return fail(fmt.Errorf("sync migration journal before %s hook %d PATCH: %w", principal.ScopeName, hook.ID, err))
+		}
+		reachMigrationCheckpoint(config, migrationCheckpointJournalSynced)
 		if err := client.updateHook(ctx, accessToken, principal, hook.ID, secureHookPayload(config.WebhookURL, credential)); err != nil {
 			return fail(err)
 		}
+		reachMigrationCheckpoint(config, migrationCheckpointRemotePatched)
 		if err := insertMigrationHookCredential(ctx, tx, credential); err != nil {
 			return fail(err)
 		}
@@ -451,7 +588,7 @@ func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaCli
 	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT rotate_legacy_hooks`); err != nil {
 		return nil, err
 	}
-	return records, nil
+	return append([]legacyHookRollbackRecord(nil), manifest.Hooks[journalStart:]...), nil
 }
 
 func secureHookPayload(webhookURL string, credential HookCredential) map[string]interface{} {
@@ -495,19 +632,63 @@ func writeEncryptedMigrationManifest(path string, cipher *TokenCipher, manifest 
 	if err != nil {
 		return fmt.Errorf("encrypt rollback manifest: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	directory := filepath.Dir(path)
+	file, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-")
 	if err != nil {
-		return fmt.Errorf("create rollback manifest: %w", err)
+		return fmt.Errorf("create rollback manifest temporary file: %w", err)
 	}
-	_, writeErr := file.Write([]byte(base64.RawStdEncoding.EncodeToString(sealed)))
-	closeErr := file.Close()
-	if writeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("write rollback manifest: %w", writeErr)
+	temporaryPath := file.Name()
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("protect rollback manifest: %w", err)
+	}
+	encoded := []byte(base64.RawStdEncoding.EncodeToString(sealed))
+	if _, err := file.Write(encoded); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write rollback manifest: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync rollback manifest: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close rollback manifest: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("install rollback manifest: %w", err)
+	}
+	removeTemporary = false
+	if err := syncMigrationManifestDirectory(directory); err != nil {
+		return err
+	}
+	return nil
+}
+
+func removeDurableMigrationManifest(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncMigrationManifestDirectory(filepath.Dir(path))
+}
+
+func syncMigrationManifestDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open rollback manifest directory: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync rollback manifest directory: %w", syncErr)
 	}
 	if closeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("close rollback manifest: %w", closeErr)
+		return fmt.Errorf("close rollback manifest directory: %w", closeErr)
 	}
 	return nil
 }
@@ -528,9 +709,7 @@ func RestoreLegacyHooks(ctx context.Context, config LegacyHookRestoreConfig) err
 		return err
 	}
 	client := migrationGiteaClient{httpClient: config.HTTPClient}
-	if client.httpClient == nil {
-		client.httpClient = &http.Client{Timeout: 10 * time.Second}
-	}
+	client.httpClient = noRedirectHTTPClient(client.httpClient, 10*time.Second, ErrSecretHTTPRedirect)
 	var failures []error
 	for _, hook := range manifest.Hooks {
 		client.apiURL = hook.GiteaAPIURL
@@ -558,8 +737,15 @@ func readEncryptedMigrationManifest(path string, cipher *TokenCipher) (securityM
 	if err := json.Unmarshal(plaintext, &manifest); err != nil {
 		return securityMigrationManifest{}, fmt.Errorf("parse rollback manifest: %w", err)
 	}
+	if manifest.Version == 1 {
+		manifest.State = migrationManifestCompleted
+		return manifest, nil
+	}
 	if manifest.Version != securityMigrationManifestVersion {
 		return securityMigrationManifest{}, fmt.Errorf("unsupported rollback manifest version %d", manifest.Version)
+	}
+	if manifest.State != migrationManifestInProgress && manifest.State != migrationManifestCompleted {
+		return securityMigrationManifest{}, fmt.Errorf("unsupported rollback manifest state %q", manifest.State)
 	}
 	return manifest, nil
 }
@@ -732,7 +918,7 @@ func runSecurityMigrationCommand(args []string) (handled bool, err error) {
 		return true, RunSecurityMigration(context.Background(), SecurityMigrationConfig{
 			DatabasePath: *database, BackupPath: *backup, ManifestPath: *manifest, TokenEncryptionKey: key,
 			LegacyWebhookSecret: legacySecret, GiteaAPIURL: os.Getenv("GITEA_API_URL"), WebhookURL: os.Getenv("WEBHOOK_PUBLIC_URL"),
-			SkipFailedOrganizations: *skipOrganizations,
+			AppEnv: os.Getenv("APP_ENV"), SkipFailedOrganizations: *skipOrganizations,
 		})
 	case "restore-legacy-hooks":
 		flags := flag.NewFlagSet("restore-legacy-hooks", flag.ContinueOnError)

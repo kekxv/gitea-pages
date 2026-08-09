@@ -28,6 +28,7 @@ func runGitClone(ctx context.Context, gitBinary string, cloneURL *url.URL, targe
 		"-c", "protocol.file.allow=never",
 		"-c", "protocol.ext.allow=never",
 		"-c", "protocol.git.allow=never",
+		"-c", "http.followRedirects=false",
 		"clone", "--branch", "gh-pages", "--single-branch", "--depth", "1", "--", cloneURL.String(), targetDir,
 	)
 	cmd.Env = []string{
