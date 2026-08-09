@@ -79,7 +79,7 @@ GITEA_PUBLIC_URL=https://gitea.example.com
 
 #### Step 3: User Authorization
 
-1. Visit `http://your-deployer-host:8080`
+1. Visit `https://pages.yourdomain.com`
 2. Click **"Authorize Gitea Pages"**
 3. Login to Gitea and approve the authorization
 4. Webhooks are automatically registered for all your repositories
@@ -327,7 +327,7 @@ GITEA_PUBLIC_URL=https://gitea.example.com
 
 #### 步骤 3：用户授权
 
-1. 访问 `http://your-deployer-host:8080`
+1. 访问 `https://pages.yourdomain.com`
 2. 点击 **"授权 Gitea Pages"**
 3. 登录 Gitea 并批准授权
 4. Webhook 自动为你所有仓库注册

@@ -71,7 +71,17 @@ require_text README.md 'administrator token pool'
 require_text AI.md 'offline migration'
 require_text AI.md 'ENABLE_ORGANIZATION_HOOKS=true'
 require_text AI.md 'administrator token pool'
-if grep -Eqi 'write:admin|GITEA_ACCESS_TOKEN|SSH private-key mount' README.md AI.md; then
-    printf 'user-facing documentation still contains a retired shared credential instruction\n' >&2
+user_facing_paths=(README.md AI.md docs/security.md .env.example examples)
+if rg -n -i \
+    -e 'write:admin' \
+    -e 'GITEA_ACCESS_TOKEN' \
+    -e 'WEBHOOK_SECRET[=[:space:]]' \
+    -e 'OAUTH_CLIENT_SECRET=' \
+    -e 'WEBHOOK_PUBLIC_URL=http://deployer:8080' \
+    -e 'https?://[^[:space:]]*deployer[^[:space:]]*:8080' \
+    -e 'https?://(localhost|[^[:space:]]*deployer[^[:space:]]*):8080/(oauth|webhook)' \
+    -e 'SSH private-key mount' \
+    "${user_facing_paths[@]}"; then
+    printf 'user-facing documentation or examples still contain a retired credential or public Deployer route\n' >&2
     exit 1
 fi

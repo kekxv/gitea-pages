@@ -1,215 +1,50 @@
-# Gitea Pages Quickstart / 快速开始
+# Hardened deployment quickstart / 安全部署快速开始
 
-[English](#english) | [中文](#中文)
+The former all-in-one local example was removed because it published Deployer
+directly, placed credentials in environment files, and instructed operators to
+use legacy shared credentials. It is not compatible with the hardened runtime.
 
----
+Use the repository-root `docker-compose.yml` and `.env.example` instead. That
+topology publishes only Nginx; the public OAuth callback and webhook endpoint
+are both served at `https://pages.<DOMAIN>/`. Deployer remains private on the
+Compose backend network and receives secrets only through the configured
+secret files.
 
-<a name="english"></a>
+1. Copy `.env.example` to `.env` and set `DOMAIN`, the Gitea URLs, and the
+   OAuth client ID.
+2. Create the session, token-encryption, and OAuth-client-secret files exactly
+   as documented in `.env.example`; restrict each to mode `0600`.
+3. Register `https://pages.<DOMAIN>/oauth/callback` as the Gitea OAuth callback
+   and use `https://pages.<DOMAIN>/webhook` as the hook target.
+4. Start the root Compose stack with `docker compose up -d` and complete OAuth
+   from `https://pages.<DOMAIN>/`.
+5. Keep `ENABLE_ORGANIZATION_HOOKS=true` for the approved automatic
+   organization-hook flow backed by the administrator token pool.
 
-## English
-
-Complete test environment including Gitea, Deployer, and Nginx.
-
-### Quick Start
-
-```bash
-chmod +x *.sh
-./test.sh
-```
-
-### Services After Startup
-
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| Gitea | http://localhost:3000 | `testuser` / `testpassword123` |
-| Deployer UI | http://localhost:8080 | - |
-| Nginx (Sites) | http://localhost:8888 | - |
-
-### OAuth2 Configuration (Recommended)
-
-Users can self-authorize to enable automatic webhook registration:
-
-1. **Create OAuth2 Application in Gitea:**
-   - Login to Gitea: http://localhost:3000
-   - Go to **Settings → Applications → OAuth2 Applications**
-   - Click **Create OAuth2 Application**
-   - Fill in:
-     - Application Name: `Gitea Pages`
-     - Redirect URI: `http://localhost:8080/oauth/callback`
-     - **Confidential Client: YES** (Important!)
-   - Copy Client ID and Client Secret
-
-2. **Configure `.env`:**
-   ```bash
-   OAUTH_CLIENT_ID=your-client-id
-   OAUTH_CLIENT_SECRET=your-client-secret
-   OAUTH_REDIRECT_URL=http://localhost:8080/oauth/callback
-   WEBHOOK_PUBLIC_URL=http://deployer:8080/webhook
-   GITEA_PUBLIC_URL=http://localhost:3000
-   ```
-
-3. **Restart deployer:**
-   ```bash
-   docker compose up -d
-   ```
-
-4. **Authorize:**
-   - Visit http://localhost:8080
-   - Click "Authorize Gitea Pages"
-   - Login and approve
-
-### Permission Explanation
-
-| Permission | Purpose |
-|------------|---------|
-| Read User Info | Get username to identify site ownership |
-| Read Repositories | Clone repository code for deployment |
-| Manage Webhooks | Auto-register webhooks for push/delete events |
-
-Users can revoke authorization in Gitea **Settings → Applications → OAuth2 Applications**.
-
-### Legacy Mode: Access Token
-
-Alternatively, configure a shared access token:
-
-1. Login to Gitea: http://localhost:3000
-2. Go to **Settings → Applications → Access Tokens**
-3. Create token with scopes: `write:repository`, `write:admin`, `write:user`
-4. Add to `.env`:
-   ```bash
-   GITEA_ACCESS_TOKEN=your-token
-   ```
-
-### Test Sites
-
-Add to `/etc/hosts`:
-```
-127.0.0.1 testuser.pages.local
-```
-
-Access:
-- Root site: http://testuser.pages.local:8888/ (repo: `testuser.pages.local`)
-- Sub site: http://testuser.pages.local:8888/test-pages/ (repo: `test-pages`)
-
-### Available Scripts
-
-| Script | Description |
-|--------|-------------|
-| `test.sh` | Complete test flow (first run) |
-| `cleanup.sh` | Stop containers and clean up |
-
-### test.sh Subcommands
-
-```bash
-./test.sh setup-gitea     # Create user and token
-./test.sh create-webhook  # Create system webhook
-./test.sh create-repo     # Create test repository
-./test.sh trigger         # Trigger deployment
-./test.sh verify          # Verify deployment
-```
+Existing installations using historical global hook credentials must complete
+the offline migration before starting the hardened stack. Follow
+[`docs/security.md`](../../docs/security.md) for the migration, rollback, and
+incident-response procedures.
 
 ---
 
-<a name="中文"></a>
+旧版的一体化本地示例已删除：它直接暴露 Deployer、在环境文件中保存凭据，并且
+指导使用已废弃的共享凭据，与加固后的运行时不兼容。
 
-## 中文
+请改用仓库根目录的 `docker-compose.yml` 和 `.env.example`。该拓扑只发布
+Nginx；公开 OAuth 回调和 webhook 端点均为 `https://pages.<DOMAIN>/`。Deployer
+仅位于 Compose 后端私有网络，并且只通过配置的 secret 文件读取密钥。
 
-完整的测试环境，包含 Gitea、Deployer 和 Nginx。
+1. 将 `.env.example` 复制为 `.env`，设置 `DOMAIN`、Gitea URL 和 OAuth 客户端 ID。
+2. 按 `.env.example` 所述创建会话、令牌加密和 OAuth 客户端密钥文件，并将每个
+   文件权限设为 `0600`。
+3. 在 Gitea 中注册 `https://pages.<DOMAIN>/oauth/callback`，并使用
+   `https://pages.<DOMAIN>/webhook` 作为 hook 目标。
+4. 在仓库根目录运行 `docker compose up -d`，然后从
+   `https://pages.<DOMAIN>/` 完成 OAuth。
+5. 保持 `ENABLE_ORGANIZATION_HOOKS=true`，以使用管理员 token 池支持的自动组织
+   hook 流程。
 
-### 快速开始
-
-```bash
-chmod +x *.sh
-./test.sh
-```
-
-### 启动后的服务
-
-| 服务 | 地址 | 凭据 |
-|------|------|------|
-| Gitea | http://localhost:3000 | `testuser` / `testpassword123` |
-| Deployer UI | http://localhost:8080 | - |
-| Nginx (站点) | http://localhost:8888 | - |
-
-### OAuth2 配置（推荐）
-
-用户可以自助授权，启用自动 webhook 注册：
-
-1. **在 Gitea 创建 OAuth2 应用：**
-   - 登录 Gitea: http://localhost:3000
-   - 进入 **设置 → 应用 → OAuth2 应用**
-   - 点击 **创建 OAuth2 应用**
-   - 填写：
-     - 应用名称：`Gitea Pages`
-     - 重定向 URI：`http://localhost:8080/oauth/callback`
-     - **机密客户端：是**（重要！）
-   - 复制客户端 ID 和客户端密钥
-
-2. **配置 `.env`：**
-   ```bash
-   OAUTH_CLIENT_ID=你的客户端ID
-   OAUTH_CLIENT_SECRET=你的客户端密钥
-   OAUTH_REDIRECT_URL=http://localhost:8080/oauth/callback
-   WEBHOOK_PUBLIC_URL=http://deployer:8080/webhook
-   GITEA_PUBLIC_URL=http://localhost:3000
-   ```
-
-3. **重启 deployer：**
-   ```bash
-   docker compose up -d
-   ```
-
-4. **授权：**
-   - 访问 http://localhost:8080
-   - 点击"授权 Gitea Pages"
-   - 登录并批准
-
-### 权限说明
-
-| 权限 | 用途 |
-|------|------|
-| 读取用户信息 | 获取用户名以标识站点所有权 |
-| 读取仓库 | 克隆仓库代码进行部署 |
-| 管理 Webhook | 自动注册推送/删除事件的 webhook |
-
-用户可随时在 Gitea **设置 → 应用 → OAuth2 应用** 中撤销授权。
-
-### 传统模式：Access Token
-
-或者，配置共享 access token：
-
-1. 登录 Gitea: http://localhost:3000
-2. 进入 **设置 → 应用 → Access Tokens**
-3. 创建 token，选择权限: `write:repository`、`write:admin`、`write:user`
-4. 添加到 `.env`：
-   ```bash
-   GITEA_ACCESS_TOKEN=你的token
-   ```
-
-### 测试站点
-
-添加到 `/etc/hosts`:
-```
-127.0.0.1 testuser.pages.local
-```
-
-访问：
-- 根目录站点: http://testuser.pages.local:8888/ (仓库: `testuser.pages.local`)
-- 子目录站点: http://testuser.pages.local:8888/test-pages/ (仓库: `test-pages`)
-
-### 可用脚本
-
-| 脚本 | 说明 |
-|------|------|
-| `test.sh` | 完整测试流程（首次运行） |
-| `cleanup.sh` | 停止容器并清理环境 |
-
-### test.sh 子命令
-
-```bash
-./test.sh setup-gitea     # 创建用户和 token
-./test.sh create-webhook  # 创建系统 webhook
-./test.sh create-repo     # 创建测试仓库
-./test.sh trigger         # 触发部署
-./test.sh verify          # 验证部署
-```
+使用历史全局 hook 凭据的现有安装必须先完成离线迁移，之后才能启动加固后的
+服务。迁移、回滚和事件响应请参见
+[`docs/security.md`](../../docs/security.md)。

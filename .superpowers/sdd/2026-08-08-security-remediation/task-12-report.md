@@ -60,3 +60,25 @@ git diff --check                                                  # PASS
 The brief's historical `cd tests && go test -race ./...` command was not
 carried forward: `tests/` was not a Go module and the removed harness used the
 pre-security API. CI now invokes the actual module location (`deployer/`).
+
+## Round 1 — quickstart and public-route remediation
+
+- Removed the unsafe runnable quickstart Compose stack, generated environment
+  template, test script, and cleanup script. They exposed Deployer on a host
+  port and retained shared credentials and plaintext OAuth client secrets.
+- Replaced the quickstart with a bilingual migration-safe guide to the
+  repository-root hardened topology: Nginx-only ingress, file-mounted secrets,
+  public `pages.<DOMAIN>` OAuth/webhook routes, automatic organization hooks,
+  and the required offline migration for legacy deployments.
+- Updated both README authorization links and the root environment example so
+  neither sends users to a public Deployer `:8080` endpoint.
+- Expanded the release-contract test to scan README, AI guidance, security
+  documentation, the root environment example, and every example for retired
+  shared-token/global-secret variables, plaintext OAuth secret assignments,
+  administrator scopes, and public Deployer OAuth/webhook routes.
+
+### Round 1 TDD evidence
+
+The expanded release-contract test first failed and listed the stale root
+environment callback plus all unsafe quickstart files. It passes after their
+removal/replacement and the documentation updates.
