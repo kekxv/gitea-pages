@@ -120,7 +120,6 @@ setup_gitea() {
     cat > "$SCRIPT_DIR/.env" << EOF
 # Gitea Pages Configuration
 DOMAIN=pages.local
-WEBHOOK_SECRET=test-webhook-secret
 MAX_SITE_SIZE_MB=50
 
 # Gitea API URL (internal Docker network)
@@ -208,76 +207,12 @@ create_oauth_app() {
     fi
 }
 
-# Create system-wide webhook (global webhook for all repositories)
+# Webhooks are registered only after the repository owner completes OAuth.
+# The deployer stores an independent credential for each authenticated hook;
+# a global shared-secret webhook would be rejected by the hardened runtime.
 create_system_webhook() {
-    log_info "Creating system webhook (global)..."
-
-    # Load token from .env if GITEA_TOKEN is not set
-    if [ -z "$GITEA_TOKEN" ] && [ -f "$SCRIPT_DIR/.env" ]; then
-        GITEA_TOKEN=$(grep "^GITEA_ACCESS_TOKEN=" "$SCRIPT_DIR/.env" | cut -d= -f2)
-    fi
-
-    if [ -z "$GITEA_TOKEN" ]; then
-        log_error "GITEA_TOKEN not set. Run 'setup-gitea' first or set in .env"
-        return 1
-    fi
-
-    local response
-    response=$(curl -sf -X POST \
-        -H "Authorization: Bearer $GITEA_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "type": "gitea",
-            "config": {
-                "url": "http://deployer:8080/webhook",
-                "content_type": "json",
-                "secret": "test-webhook-secret"
-            },
-            "events": ["push", "delete"],
-            "active": true
-        }' \
-        "http://localhost:3000/api/v1/admin/hooks" 2>&1)
-
-    if echo "$response" | grep -q '"id"'; then
-        local hook_id=$(echo "$response" | jq -r '.id')
-        log_success "System webhook created (ID: $hook_id)"
-        log_info "This webhook will trigger for ALL repositories"
-    elif echo "$response" | grep -qi "already\|已存在"; then
-        log_info "System webhook already exists"
-    else
-        log_warning "Could not create system webhook, trying repository-level webhook..."
-        log_debug "Response: $response"
-        # Fallback: create for specific repo
-        create_repo_webhook "testuser/test-pages"
-    fi
-}
-
-# Create webhook for specific repository
-create_repo_webhook() {
-    local repo=$1
-    log_info "Creating webhook for $repo..."
-
-    # Load token from .env if GITEA_TOKEN is not set
-    if [ -z "$GITEA_TOKEN" ] && [ -f "$SCRIPT_DIR/.env" ]; then
-        GITEA_TOKEN=$(grep "^GITEA_ACCESS_TOKEN=" "$SCRIPT_DIR/.env" | cut -d= -f2)
-    fi
-
-    curl -sf -X POST \
-        -H "Authorization: Bearer $GITEA_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "type": "gitea",
-            "config": {
-                "url": "http://deployer:8080/webhook",
-                "content_type": "json",
-                "secret": "test-webhook-secret"
-            },
-            "events": ["push", "delete"],
-            "active": true
-        }' \
-        "http://localhost:3000/api/v1/repos/$repo/hooks" > /dev/null
-
-    log_success "Webhook created for $repo"
+    log_info "Skipping global webhook registration."
+    log_info "Open the deployer in a browser and complete OAuth; it registers per-user and per-organization hooks with independent credentials."
 }
 
 # Restart deployer with new configuration

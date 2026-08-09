@@ -10,12 +10,13 @@ import (
 )
 
 var (
-	ErrRepositoryMismatch   = errors.New("webhook repository does not match canonical repository")
-	ErrRepositoryOutOfScope = errors.New("canonical repository is outside hook scope")
-	ErrUntrustedCloneURL    = errors.New("canonical repository clone URL is untrusted")
-	ErrRepositoryAccess     = errors.New("no access token for webhook principal")
-	ErrUnsupportedWebhook   = errors.New("unsupported webhook event")
-	ErrMalformedWebhook     = errors.New("malformed webhook payload")
+	ErrRepositoryMismatch     = errors.New("webhook repository does not match canonical repository")
+	ErrRepositoryOutOfScope   = errors.New("canonical repository is outside hook scope")
+	ErrUntrustedCloneURL      = errors.New("canonical repository clone URL is untrusted")
+	ErrUntrustedRepositoryAPI = errors.New("canonical repository API response is untrusted")
+	ErrRepositoryAccess       = errors.New("no access token for webhook principal")
+	ErrUnsupportedWebhook     = errors.New("unsupported webhook event")
+	ErrMalformedWebhook       = errors.New("malformed webhook payload")
 )
 
 // VerifiedRepository is canonical repository metadata fetched from Gitea.

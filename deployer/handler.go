@@ -113,7 +113,7 @@ func writeWebhookError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrInvalidPathComponent), errors.Is(err, ErrUnsafeSiteTarget):
 		http.Error(w, "Bad request", http.StatusBadRequest)
 	case errors.Is(err, ErrRepositoryMismatch), errors.Is(err, ErrRepositoryOutOfScope),
-		errors.Is(err, ErrUntrustedCloneURL), errors.Is(err, ErrRepositoryAccess):
+		errors.Is(err, ErrUntrustedCloneURL), errors.Is(err, ErrUntrustedRepositoryAPI), errors.Is(err, ErrRepositoryAccess):
 		http.Error(w, "Repository forbidden", http.StatusForbidden)
 	case errors.Is(err, ErrRepositoryTooLarge):
 		http.Error(w, "Repository too large", http.StatusRequestEntityTooLarge)

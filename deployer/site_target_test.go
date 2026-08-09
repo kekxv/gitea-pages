@@ -41,12 +41,8 @@ func TestNewSiteTargetRejectsInvalidComponents(t *testing.T) {
 
 func TestRootRepositoryMatchIsExact(t *testing.T) {
 	root := t.TempDir()
-	if _, err := NewSiteTarget(root, "alice", "alice.pages.evil.com", "example.com"); err != nil {
-		t.Fatal(err)
-	}
-	target, _ := NewSiteTarget(root, "alice", "alice.pages.evil.com", "example.com")
-	if target.IsRoot() {
-		t.Fatal("foreign domain repository must not become root site")
+	if _, err := NewSiteTarget(root, "alice", "alice.pages.evil.com", "example.com"); err == nil {
+		t.Fatal("foreign Pages domain repository was accepted")
 	}
 }
 

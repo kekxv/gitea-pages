@@ -55,6 +55,13 @@ func NewSiteTarget(root, owner, repo, domain string) (SiteTarget, error) {
 		return SiteTarget{}, err
 	}
 
+	// Repository names in the owner.pages.<domain> namespace select the
+	// account root site. A similarly named foreign domain must never create a
+	// second destructive path below the same owner directory.
+	if strings.HasPrefix(repo, owner+".pages.") && repo != owner+".pages."+domain {
+		return SiteTarget{}, fmt.Errorf("repository: %w", ErrInvalidPathComponent)
+	}
+
 	rootSite := repo == owner || repo == owner+".pages."+domain
 	leaf := repo
 	if rootSite {
