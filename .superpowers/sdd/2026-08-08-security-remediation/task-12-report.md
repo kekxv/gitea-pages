@@ -82,3 +82,24 @@ pre-security API. CI now invokes the actual module location (`deployer/`).
 The expanded release-contract test first failed and listed the stale root
 environment callback plus all unsafe quickstart files. It passes after their
 removal/replacement and the documentation updates.
+
+## Round 2 — stale example-index and scope-claim remediation
+
+- Replaced `examples/README.md`'s deleted quickstart script instructions with
+  the hardened root Compose topology, public Nginx routes, and links to the
+  retained setup guide and repository validation scripts.
+- Updated both README testing sections to invoke the actual module-local Go
+  suite and the retained Compose/Nginx policy tests rather than deleted
+  quickstart scripts.
+- Reworded the remaining Chinese feature claim to describe independent,
+  scoped hook credentials rather than automatic registration for every
+  repository.
+- Extended the release-contract scan to reject user-facing references to the
+  deleted scripts and system-wide/all-repository hook claims.
+
+### Round 2 TDD evidence
+
+The expanded scan first failed on both README `./test.sh` invocations, every
+old example-index command, its system-wide hook claim, and the remaining
+Chinese all-repositories feature claim. It passes after the documentation was
+updated.

@@ -80,6 +80,10 @@ if rg -n -i \
     -e 'WEBHOOK_PUBLIC_URL=http://deployer:8080' \
     -e 'https?://[^[:space:]]*deployer[^[:space:]]*:8080' \
     -e 'https?://(localhost|[^[:space:]]*deployer[^[:space:]]*):8080/(oauth|webhook)' \
+    -e '\./test\.sh' \
+    -e '\./cleanup\.sh' \
+    -e 'system[- ]wide[^[:cntrl:]]*hook' \
+    -e '所有仓库' \
     -e 'SSH private-key mount' \
     "${user_facing_paths[@]}"; then
     printf 'user-facing documentation or examples still contain a retired credential or public Deployer route\n' >&2

@@ -82,7 +82,8 @@ GITEA_PUBLIC_URL=https://gitea.example.com
 1. Visit `https://pages.yourdomain.com`
 2. Click **"Authorize Gitea Pages"**
 3. Login to Gitea and approve the authorization
-4. Webhooks are automatically registered for all your repositories
+4. A scoped webhook is automatically registered for your authorized personal
+   and organization scopes
 
 ### Permission Explanation
 
@@ -91,7 +92,7 @@ When users authorize Gitea Pages, the following permissions are requested:
 | Permission | Scope | Purpose |
 |------------|-------|---------|
 | Read User Info | `read:user` | Get username to identify site ownership |
-| Manage User Settings | `write:user` | Register user-level webhooks for all personal repos |
+| Manage User Settings | `write:user` | Register a personal-scope webhook |
 | Read Repositories | `read:repository` | Clone repository code for deployment |
 | Manage Organization Webhooks | `write:organization` | Automatically register organization hooks through the approved administrator token pool |
 
@@ -237,18 +238,17 @@ gitea-pages/
 │   ├── web.go             # Web UI
 │   ├── auto_register.go   # Auto webhook registration
 │   └── security.go        # Security utilities
-└── examples/quickstart/   # Complete test environment
+└── examples/quickstart/   # Hardened deployment guide
 ```
 
 ### Testing
 
 ```bash
-# Unit tests
-cd deployer && go test -v ./...
+# Go unit and end-to-end regression tests
+cd deployer && go test -race ./...
 
-# Integration test environment
-cd examples/quickstart
-./test.sh
+# Compose and Nginx containment checks
+cd .. && bash tests/compose_security_test.sh && bash tests/nginx_test.sh
 ```
 
 ### License
@@ -270,7 +270,7 @@ MIT License
 - **泛域名路由**：支持 `username.pages.yourdomain.com` 和 `username.pages.yourdomain.com/repo`
 - **安全加固**：非 root 容器、阻止软链接、路径遍历防护
 - **私有仓库支持**：OAuth2 用户授权
-- **自动注册 Webhook**：用户授权一次，自动为所有仓库注册 webhook
+- **范围化 Webhook 注册**：每个 Gitea hook 均拥有独立 key 和 HMAC secret
 
 ### 快速开始
 
@@ -330,7 +330,7 @@ GITEA_PUBLIC_URL=https://gitea.example.com
 1. 访问 `https://pages.yourdomain.com`
 2. 点击 **"授权 Gitea Pages"**
 3. 登录 Gitea 并批准授权
-4. Webhook 自动为你所有仓库注册
+4. 系统会为已授权的个人和组织范围自动注册独立 webhook
 
 ### 权限说明
 
@@ -339,7 +339,7 @@ GITEA_PUBLIC_URL=https://gitea.example.com
 | 权限 | Scope | 用途 |
 |------|-------|------|
 | 读取用户信息 | `read:user` | 获取用户名以标识站点所有权 |
-| 管理用户设置 | `write:user` | 注册用户级 webhook，覆盖所有个人仓库 |
+| 管理用户设置 | `write:user` | 注册个人范围的 webhook |
 | 读取仓库 | `read:repository` | 克隆仓库代码进行部署 |
 | 管理组织 Webhook | `write:organization` | 通过已批准的管理员 token 池自动注册组织 webhook |
 
@@ -438,18 +438,17 @@ gitea-pages/
 │   ├── web.go             # Web UI
 │   ├── auto_register.go   # 自动注册 webhook
 │   └── security.go        # 安全工具函数
-└── examples/quickstart/   # 完整测试环境
+└── examples/quickstart/   # 安全部署指南
 ```
 
 ### 测试
 
 ```bash
-# 单元测试
-cd deployer && go test -v ./...
+# Go 单元和端到端回归测试
+cd deployer && go test -race ./...
 
-# 集成测试环境
-cd examples/quickstart
-./test.sh
+# Compose 与 Nginx 隔离检查
+cd .. && bash tests/compose_security_test.sh && bash tests/nginx_test.sh
 ```
 
 ### 许可证
