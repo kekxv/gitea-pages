@@ -30,6 +30,14 @@ docker run --rm --read-only --user 1000:1000 --cap-drop ALL \
     --tmpfs /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     "$image" nginx -t
 
+rendered_nginx="$(docker run --rm --read-only --user 1000:1000 --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
+    --tmpfs /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
+    "$image" nginx -T 2>&1)"
+grep -Fq 'client_max_body_size 1m;' <<<"$rendered_nginx"
+grep -Fq 'limit_req zone=webhook' <<<"$rendered_nginx"
+
 docker run -d --name "$container" --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
     --add-host deployer:127.0.0.1 \
@@ -63,6 +71,7 @@ assert_status 421 alice.pages.attacker.com /
 assert_status 421 alice.pages.example.com.attacker.com /
 assert_status 403 alice.pages.example.com /.hidden
 assert_status 403 alice.pages.example.com /_root
+assert_status 405 pages.example.com /webhook
 
 printf '%032d\n' 0 > "$secret_dir/session"
 printf '%032d\n' 0 > "$secret_dir/token-key"

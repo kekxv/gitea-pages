@@ -2,7 +2,7 @@
 # Multi-stage build for minimal image, non-root user
 
 # Build stage
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 WORKDIR /build
 
@@ -20,7 +20,7 @@ COPY *.go ./
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o deployer .
 
 # Final stage
-FROM alpine:3.21
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 # Security: Create non-privileged user
 ARG PUID=1000

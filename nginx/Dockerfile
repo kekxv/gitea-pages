@@ -18,7 +18,9 @@ RUN case "$PAGES_DOMAIN" in \
       ''|*[!A-Za-z0-9.-]*|.*|*..*|*.) exit 1 ;; \
     esac && \
     domain_regex="$(printf '%s' "$PAGES_DOMAIN" | sed 's/\./\\\\./g')" && \
-    sed "s/__PAGES_DOMAIN_REGEX__/${domain_regex}/g" /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && \
+    sed -e "s/__PAGES_DOMAIN_REGEX__/${domain_regex}/g" \
+        -e "s/__PAGES_DOMAIN_LITERAL__/${PAGES_DOMAIN}/g" \
+        /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && \
     rm /etc/nginx/nginx.conf.template /etc/nginx/conf.d/default.conf
 
 USER pagesuser

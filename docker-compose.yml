@@ -5,10 +5,12 @@ services:
     build:
       context: ./nginx
       args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
         PAGES_DOMAIN: ${DOMAIN:?DOMAIN must be set to the Pages parent domain}
     container_name: gitea-pages-nginx
     restart: unless-stopped
-    user: "1000:1000"
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "${HTTP_PORT:-80}:8080"
     volumes:
@@ -18,7 +20,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    pids_limit: 64
+    pids_limit: 128
     cpus: "0.50"
     mem_limit: 128M
     tmpfs:
@@ -34,14 +36,18 @@ services:
       deployer:
         condition: service_started
     networks:
+      - pages_frontend
       - pages_backend
 
   deployer:
     build:
       context: ./deployer
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
     container_name: gitea-pages-deployer
     restart: unless-stopped
-    user: "1000:1000"
+    user: "${PUID:-1000}:${PGID:-1000}"
     expose:
       - "8080"
     volumes:
@@ -92,7 +98,7 @@ services:
     cpus: "1.00"
     mem_limit: 512M
     tmpfs:
-      - /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700
+      - /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700,size=256m
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 30s
@@ -122,6 +128,9 @@ secrets:
     file: ${OAUTH_CLIENT_SECRET_HOST_FILE:?OAUTH_CLIENT_SECRET_HOST_FILE must name a readable secret file}
 
 networks:
+  pages_frontend:
+    name: gitea-pages-frontend
+    driver: bridge
   pages_backend:
     name: gitea-pages-backend
     driver: bridge
