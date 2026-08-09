@@ -31,7 +31,7 @@ chmod 755 "$pages_dir"
 printf 'Alice root site\n' > "$pages_dir/alice/_root/index.html"
 printf 'Alice project site\n' > "$pages_dir/alice/project/index.html"
 
-grep -Eq '^FROM nginx:[0-9]+\.[0-9]+\.[0-9]+-alpine@sha256:[0-9a-f]{64}$' nginx/Dockerfile
+grep -Eq '^FROM nginx:1\.29-alpine@sha256:[0-9a-f]{64}$' nginx/Dockerfile
 docker build --build-arg PAGES_DOMAIN=example.com -t "$image" ./nginx
 
 docker run --rm --read-only --user 1000:1000 --cap-drop ALL \

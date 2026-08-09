@@ -1,81 +1,90 @@
-### 角色设定
-你现在是一位资深的 DevOps 工程师和安全专家。你的任务是帮我开发一套名为 **"Gitea-Pages-Actionless"** 的自动化部署系统。
+# Gitea Pages — current architecture contract
 
-### 项目目标
-为 Gitea 实现类似早期 GitHub Pages 的全自动静态网站托管功能。
-1. **用户零操作**：只要向任意仓库的 `gh-pages` 分支推送代码，就能自动部署上线。
-2. **完美路由还原**：
-   - 根目录站点：仓库名为 `username.pages.domain.com`，访问 `https://username.pages.domain.com`
-   - 子目录站点：仓库名为 `my-repo`，访问 `https://username.pages.domain.com/my-repo`
-3. **极致安全性（核心需求）**：禁止直接在宿主机运行代码。必须通过 Docker 容器化运行，彻底防范容器逃逸、恶意脚本执行和软链接越权读取攻击。
+Use this document as the source of truth when changing Gitea Pages. It
+supersedes the early prototype design.
 
----
+## Deployment topology
 
-### 架构设计要求
-系统将由一个 `docker-compose.yml` 编排，包含两个核心容器：
+- Nginx is the only service with a published host port. It terminates the
+  public Pages and `pages.<DOMAIN>` routes.
+- Deployer has no published host port. Nginx forwards its OAuth and webhook
+  routes to Deployer on the internal `pages_backend` network.
+- Deployer can reach Gitea through its dedicated egress network, but has no
+  Docker socket, no SSH key, no privileged mode, no Linux capabilities, and a
+  read-only root filesystem.
+- Nginx mounts Pages data read-only. Deployer alone writes the Pages volume and
+  publishes a new site atomically after validation.
+- Both containers run as the configured non-root UID/GID, use restrictive
+  tmpfs mounts, and have process, CPU, and memory limits.
 
-1. **Webhook 接收与处理容器 (Deployer Service)**
-   - 语言建议：使用 Go 或 Node.js 编写的轻量级 API 服务。
-   - 职责：接收 Gitea 的 System Webhook -> 校验分支 -> 执行 `git clone` -> 处理文件存储。
-   - 挂载：将宿主机的 `/data/gitea-pages` 目录挂载进容器用于写入文件。
-2. **Nginx 静态代理容器 (Web Server)**
-   - 职责：利用 `try_files` 正则匹配域名，提供静态文件 HTTP 服务。
-   - 挂载：将同样的 `/data/gitea-pages` 目录以 **Read-Only (只读)** 模式挂载进容器。
+## Authentication and authority
 
----
+- A hook key identifies one registered Gitea hook. It does not authenticate a
+  delivery by itself.
+- Each hook has its own HMAC secret, which authenticates exactly its personal
+  or organization scope. Hook credentials must never be shared across scopes.
+- Treat every webhook payload as untrusted input. It cannot select an OAuth
+  token or establish repository identity.
+- Resolve the hook scope and repository through the Gitea API. Canonical Gitea
+  metadata—not the payload's owner, repository ID, clone URL, or visibility
+  field—is authoritative.
+- Treat checked-out repository content as hostile static data: reject unsafe
+  site targets and clone transports, prevent symlinks, strip Git metadata and
+  executable permissions, apply size/time/concurrency limits, and publish only
+  after the complete replacement is ready.
 
-### 第一阶段：Nginx 容器安全与路由配置设计 (需生成 `nginx.conf`)
-请编写 Nginx 的配置文件，满足以下要求：
-1. **泛域名解析**：使用正则 `server_name ~^(?<username>[^.]+)\.pages\.yourdomain\.com$;` 捕获用户名。
-2. **智能路由（Try_Files 魔法）**：
-   - 设定网站根目录为 `/var/www/pages/$username`。
-   - 匹配规则：先查找子目录 `$uri`，如果找不到，再降级查找 `/_root$uri`（根目录站点的特殊文件夹）。
-3. **安全加固（防御重点）**：
-   - **禁止软链接**：配置 `disable_symlinks on;`，防止用户推送恶意软链接读取宿主机敏感文件。
-   - **目录屏蔽**：禁止外部通过 HTTP 直接访问 `/_root/` 路径和 `/.git/` 隐藏文件夹。
-   - **关闭列目录**：`autoindex off;`。
+## OAuth and organization hooks
 
----
+- OAuth grants are encrypted at rest with `TOKEN_ENCRYPTION_KEY_FILE`; session
+  and OAuth client secrets are file-mounted Compose secrets, never ordinary
+  environment values.
+- Personal and organization hook registration is automatic. The approved
+  administrator token pool supplies organization authorization when needed.
+- `ENABLE_ORGANIZATION_HOOKS=true` is the approved default. Set it to `false`
+  only for an installation intentionally restricted to personal repositories.
+- Do not add global webhook secrets, payload-selected OAuth tokens, shared
+  administrator access tokens, or any fallback HTTP authentication path.
 
-### 第二阶段：Deployer Webhook 服务设计 (需生成服务源码)
-请编写 Webhook 接收服务的代码（推荐 Go 或轻量级 Node.js/Python），需满足：
-1. **接口定义**：监听 `POST /webhook`。
-2. **鉴权**：校验 Gitea Webhook 的 Secret（使用 HMAC SHA256 等方式，或简单的自定义 Header Token校验）。
-3. **逻辑判断**：
-   - 解析 Payload，获取 `repository.owner.username`、`repository.name`、`ref`、`repository.clone_url`。
-   - 如果 `ref` 不是 `refs/heads/gh-pages`，返回 200 并忽略操作。
-4. **目录计算逻辑**：
-   - 判断仓库名：如果是 `${username}.pages.yourdomain.com` 或与 `${username}` 相同，则目标路径为 `/_root`。否则目标路径为 `/${repository.name}`。
-5. **安全 Git 操作（防御重点）**：
-   - 清空目标目录（如果存在）。
-   - 使用 `git clone --branch gh-pages --single-branch --depth 1` 进行浅克隆。
-   - **关键清理**：克隆完成后，**必须立即删除**目标目录下的 `.git` 文件夹。
-   - **权限剥离**：确保拉取下来的文件权限不包含执行权限（chmod -R 644 / 755）。
+## Offline migration and rollback
 
----
+Existing installations using the historical shared webhook secret must run the
+**offline migration** before starting the hardened runtime:
 
-### 第三阶段：Docker Compose 编排与防逃逸设计 (需生成 `docker-compose.yml` 和 `Dockerfile`)
-请编写完整的 `docker-compose.yml` 及构建文件，严格遵循以下防逃逸原则：
-1. **非 Root 运行**：两个容器内部都必须创建专用的非特权用户（如 UID/GID 1000 的 `pagesuser`），不允许使用 root 身份运行 Nginx 和 Deployer。
-2. **文件系统隔离**：
-   - Webhook 容器需要对映射的 Volume 具有读写权限。
-   - Nginx 容器对 Volume 必须使用 `ro` (只读) 挂载。
-3. **特权剥离**：为容器添加 `security_opt: ["no-new-privileges:true"]`。
-4. **只读根文件系统**：尽可能将容器的根文件系统设为只读 `read_only: true`（除日志、缓存等必要目录外）。
-5. **网络隔离**：
-   - Nginx 容器暴露 80 端口（或通过反向代理网络连接）。
-   - Webhook 容器仅暴露指定 Webhook 接收端口，且不需要公网直接访问（可通过你的主 Nginx 或网关代理访问）。
+```bash
+deployer migrate-security \
+  --backup /secure/backups/tokens.db.before-security-migration \
+  --manifest /secure/backups/legacy-hooks.manifest
+```
 
----
+Stop Deployer but leave Nginx serving the last published static content. The
+migration requires `TOKEN_ENCRYPTION_KEY_FILE`, `LEGACY_WEBHOOK_SECRET_FILE`,
+`GITEA_API_URL`, and `WEBHOOK_PUBLIC_URL`; it encrypts legacy OAuth rows and
+rotates every reachable hook to its scoped credential. The backup must already
+exist and have mode `0600`; the encrypted manifest also has mode `0600` and is
+retained only for the rollback window.
 
-### 交付物要求
-请一步步为我输出以下内容：
-1. **项目目录结构**的规划。
-2. **Nginx 配置文件** (`gitea-pages.conf`)。
-3. **Webhook 服务的核心代码**（请选择你认为最适合此场景的后端语言并说明理由）。
-4. **Dockerfile**（用于打包 Webhook 服务）。
-5. **安全加固版的 docker-compose.yml**。
-6. 简短的**启动与 Gitea 联调说明**。
+To roll back, stop the new Deployer, restore external hooks using the manifest,
+restore the v1 database backup, and start the recorded old image digest:
 
-请确保代码健壮，包含错误日志处理，可以直接用于生产环境。现在，请开始输出！
+```bash
+deployer restore-legacy-hooks \
+  --manifest /secure/backups/legacy-hooks.manifest
+```
 
+After the rollback window expires, remove the legacy secret file from the host.
+The normal HTTP handler must never accept that old shared secret.
+
+## Release requirements
+
+The security workflow is mandatory on pull requests and the main branch. It
+runs module-local Go race tests and coverage from `deployer/`, `govulncheck`,
+Compose topology and containment checks, the non-root Nginx test, and Trivy
+configuration/image scans. Do not invoke the historical top-level `tests/`
+directory as a Go module; its executable tests are shell policy checks, while
+the Go module and end-to-end regression suite live in `deployer/`.
+
+Before a production migration, record image digests, `0600` backup location,
+hook counts before and after migration, successful delivery IDs, and rollback
+window expiry. Keep forensic logs for suspected token compromise, forged-hook
+attempts, deployment timeouts, or disk exhaustion; preserve existing sites by
+stopping Deployer before any cleanup.

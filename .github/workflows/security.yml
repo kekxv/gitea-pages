@@ -1,0 +1,73 @@
+name: Security release gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+  GOVULNCHECK_VERSION: "v1.6.0"
+  TRIVY_VERSION: "0.73.0"
+
+jobs:
+  security:
+    name: Security release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: deployer/go.sum
+
+      - name: Install govulncheck
+        working-directory: deployer
+        run: go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+
+      - name: Run Go race tests with coverage
+        working-directory: deployer
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Check Go dependencies for vulnerabilities
+        working-directory: deployer
+        run: govulncheck ./...
+
+      - name: Validate the production Compose topology
+        run: docker compose --env-file .env.example config --quiet
+
+      - name: Validate Compose containment policy
+        run: bash tests/compose_security_test.sh
+
+      - name: Validate Nginx runtime policy
+        run: bash tests/nginx_test.sh
+
+      - name: Build release candidates for image scanning
+        run: |
+          docker build --tag gitea-pages-deployer:${GITHUB_SHA} ./deployer
+          docker build --build-arg PAGES_DOMAIN=example.com --tag gitea-pages-nginx:${GITHUB_SHA} ./nginx
+
+      - name: Install Trivy
+        run: |
+          curl --fail --location --retry 3 --output /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar --extract --gzip --file /tmp/trivy.tar.gz --directory /tmp trivy
+          install -m 0755 /tmp/trivy /usr/local/bin/trivy
+
+      - name: Scan configuration and release images
+        run: |
+          trivy config --exit-code 1 --severity HIGH,CRITICAL .
+          trivy image --exit-code 1 --severity CRITICAL gitea-pages-deployer:${GITHUB_SHA}
+          trivy image --exit-code 1 --severity CRITICAL gitea-pages-nginx:${GITHUB_SHA}
+
+      - name: Validate release documentation and workflow contracts
+        run: bash tests/security_release_gate_test.sh

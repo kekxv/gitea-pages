@@ -21,7 +21,8 @@ A GitHub Pages-like static site hosting system for Gitea. Automatically deploys 
 - **Wildcard Domain Routing**: `username.pages.yourdomain.com` and `username.pages.yourdomain.com/repo`
 - **Security Hardened**: Non-root containers, symlink blocking, path traversal protection
 - **Private Repo Support**: OAuth2 user authorization
-- **Auto Webhook Registration**: Users authorize once, webhooks auto-registered for all repos
+- **Scoped Webhook Registration**: Each Gitea hook has an independent key and HMAC secret
+- **Contained Topology**: Nginx is the only host-published service; Deployer has no Docker socket or SSH key
 
 ### Quick Start
 
@@ -34,7 +35,7 @@ curl -O https://raw.githubusercontent.com/kekxv/gitea-pages/main/.env.example
 cp .env.example .env
 # Edit .env with your settings
 
-# Pull and run
+# Create the three secret files described in .env.example, then pull and run.
 docker compose pull
 docker compose up -d
 ```
@@ -48,7 +49,7 @@ Pre-built images available at:
 ```bash
 git clone https://github.com/kekxv/gitea-pages.git
 cd gitea-pages
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ### OAuth2 Configuration (Recommended)
@@ -62,19 +63,18 @@ Users can self-authorize to enable automatic webhook registration and private re
 3. Click **Create OAuth2 Application**
 4. Fill in:
    - **Application Name**: `Gitea Pages`
-   - **Redirect URI**: `http://your-deployer-host:8080/oauth/callback`
+   - **Redirect URI**: `https://pages.yourdomain.com/oauth/callback`
    - **Confidential Client**: **YES** (Important!)
 5. Copy **Client ID** and **Client Secret**
 
 #### Step 2: Configure Deployer
 
-Add to `.env`:
+Set the client ID in `.env`; keep the client secret in the
+`OAUTH_CLIENT_SECRET_HOST_FILE` file described by `.env.example`. Compose
+constructs public callback and webhook URLs from `DOMAIN`:
 ```bash
 OAUTH_CLIENT_ID=your-client-id
-OAUTH_CLIENT_SECRET=your-client-secret
-OAUTH_REDIRECT_URL=http://your-deployer-host:8080/oauth/callback
-WEBHOOK_PUBLIC_URL=http://deployer:8080/webhook
-GITEA_PUBLIC_URL=http://your-gitea-host:3000
+GITEA_PUBLIC_URL=https://gitea.example.com
 ```
 
 #### Step 3: User Authorization
@@ -93,18 +93,20 @@ When users authorize Gitea Pages, the following permissions are requested:
 | Read User Info | `read:user` | Get username to identify site ownership |
 | Manage User Settings | `write:user` | Register user-level webhooks for all personal repos |
 | Read Repositories | `read:repository` | Clone repository code for deployment |
-| Manage Repository Webhooks | `write:repository` | Auto-register webhooks for push/delete events |
-| Manage Organization Webhooks | `write:organization` | Register org-level webhooks for all org repos |
+| Manage Organization Webhooks | `write:organization` | Automatically register organization hooks through the approved administrator token pool |
 
 Users can revoke authorization anytime in Gitea **Settings → Applications → OAuth2 Applications**.
+Organization hooks are automatic by default through the approved administrator
+token pool. Keep `ENABLE_ORGANIZATION_HOOKS=true` for this architecture; set
+it to `false` only when an installation intentionally serves personal scopes.
 
 ### Private Repository Support
 
 With OAuth2 authorization, private repositories are automatically supported. The deployer uses the user's OAuth token to clone private repos when deploying their sites.
 
-### Security Credential Migration
+### Offline security credential migration
 
-`migrate-security` is an **offline** operation that encrypts legacy OAuth
+The offline migration command, `migrate-security`, encrypts legacy OAuth
 tokens and replaces the shared webhook secret with one credential per Gitea
 hook. It uses existing OAuth grants (and the retained organization-authorizer
 pool) so users do not need to authorize again unless Gitea rejects the actual
@@ -148,19 +150,6 @@ deployer restore-legacy-hooks --manifest /secure/backups/legacy-hooks.manifest
 The restore command attempts every recorded hook and exits non-zero unless all
 of them are restored.
 
-### Legacy Mode: Shared Access Token
-
-Alternatively, you can use a shared access token (less secure, requires manual user management):
-
-1. Create a `pages-bot` user in Gitea
-2. Generate an Access Token with `write:repository`, `write:admin`, `write:user` scopes
-3. Users add `pages-bot` as collaborator to their repos
-4. Configure in `.env`:
-   ```bash
-   GITEA_ACCESS_TOKEN=pages-bot-token
-   GITEA_API_URL=https://gitea.example.com
-   ```
-
 #### Create Your Site
 
 **Root Site (username.pages.domain.com):**
@@ -193,31 +182,24 @@ Site available at: `https://username.pages.example.com/my-site`
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         Gitea Server                         │
-│  [Push to gh-pages] → [Webhook] → POST /webhook             │
-│  [Delete gh-pages] → [Webhook] → POST /webhook (delete)     │
+│    signed, per-hook delivery → pages.<DOMAIN>/webhook        │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Deployer Container                        │
-│  • Verify HMAC-SHA256 signature                             │
-│  • Filter gh-pages branch only                              │
-│  • git clone --single-branch --depth 1                      │
-│  • Remove .git directory                                    │
-│  • Set permissions 644/755                                  │
-│  • Block symlinks                                           │
-│  • OAuth2 user authorization                                │
-│  • Auto-register webhooks for authorized users              │
-│  • Delete site on branch deletion                           │
+│ Nginx (only host port) → private backend → Deployer          │
+│  • forwards /webhook and OAuth routes to internal Deployer   │
+│  • serves Pages data read-only                               │
+│  • Deployer verifies per-hook HMAC and Gitea metadata        │
+│  • Deployer publishes untrusted static content atomically    │
+│  • Deployer has no Docker socket, SSH key, or host port      │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Nginx Container                           │
-│  • Wildcard domain routing                                  │
-│  • Root site: username.pages.domain → _root/                │
-│  • Sub site: username.pages.domain/repo → repo/             │
-│  • Security: disable_symlinks, block /.git                  │
+│                     Published Pages volume                   │
+│  • root: username.pages.domain → _root/                      │
+│  • subsite: username.pages.domain/repo → repo/               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -231,9 +213,10 @@ Site available at: `https://username.pages.example.com/my-site`
 | Symlink blocking | `disable_symlinks on` + code filter |
 | Path traversal protection | Input sanitization |
 | .git directory removal | Automatic cleanup |
-| Webhook signature | HMAC-SHA256 verification |
+| Webhook authentication | Per-hook key and HMAC-SHA256 secret; Gitea metadata is canonical |
 | Site size limit | `MAX_SITE_SIZE_MB` (default 100MB) |
 | Private repo support | OAuth2 user tokens |
+| Network exposure | Only Nginx publishes a port; Deployer is private to Compose networks |
 
 ### Directory Structure
 
@@ -314,7 +297,7 @@ docker compose up -d
 ```bash
 git clone https://github.com/kekxv/gitea-pages.git
 cd gitea-pages
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ### OAuth2 配置（推荐）
@@ -328,19 +311,18 @@ docker-compose up -d --build
 3. 点击 **创建 OAuth2 应用**
 4. 填写：
    - **应用名称**：`Gitea Pages`
-   - **重定向 URI**：`http://your-deployer-host:8080/oauth/callback`
+   - **重定向 URI**：`https://pages.yourdomain.com/oauth/callback`
    - **机密客户端**：**是**（重要！）
 5. 复制 **客户端 ID** 和 **客户端密钥**
 
 #### 步骤 2：配置 Deployer
 
-添加到 `.env`：
+在 `.env` 中设置客户端 ID；客户端密钥必须保存在 `.env.example` 所述的
+`OAUTH_CLIENT_SECRET_HOST_FILE` 文件中。Compose 会根据 `DOMAIN` 构造公开回调
+和 webhook 地址：
 ```bash
 OAUTH_CLIENT_ID=你的客户端ID
-OAUTH_CLIENT_SECRET=你的客户端密钥
-OAUTH_REDIRECT_URL=http://your-deployer-host:8080/oauth/callback
-WEBHOOK_PUBLIC_URL=http://deployer:8080/webhook
-GITEA_PUBLIC_URL=http://your-gitea-host:3000
+GITEA_PUBLIC_URL=https://gitea.example.com
 ```
 
 #### 步骤 3：用户授权
@@ -359,27 +341,15 @@ GITEA_PUBLIC_URL=http://your-gitea-host:3000
 | 读取用户信息 | `read:user` | 获取用户名以标识站点所有权 |
 | 管理用户设置 | `write:user` | 注册用户级 webhook，覆盖所有个人仓库 |
 | 读取仓库 | `read:repository` | 克隆仓库代码进行部署 |
-| 管理仓库 Webhook | `write:repository` | 自动注册推送/删除事件的 webhook |
-| 管理组织 Webhook | `write:organization` | 注册组织级 webhook，覆盖组织下所有仓库 |
+| 管理组织 Webhook | `write:organization` | 通过已批准的管理员 token 池自动注册组织 webhook |
 
 用户可随时在 Gitea **设置 → 应用 → OAuth2 应用** 中撤销授权。
+组织 webhook 通过已批准的管理员 token 池默认自动注册。此架构应保持
+`ENABLE_ORGANIZATION_HOOKS=true`；只有明确只服务个人范围时才设为 `false`。
 
 ### 私有仓库支持
 
 通过 OAuth2 授权，私有仓库自动获得支持。部署时 Deployer 使用用户的 OAuth token 克隆私有仓库。
-
-### 传统模式：共享 Access Token
-
-或者，可以使用共享的 access token（安全性较低，需要手动管理用户）：
-
-1. 在 Gitea 创建 `pages-bot` 用户
-2. 生成具有 `write:repository`、`write:admin`、`write:user` 权限的 Access Token
-3. 用户将 `pages-bot` 添加为协作者
-4. 在 `.env` 中配置：
-   ```bash
-   GITEA_ACCESS_TOKEN=pages-bot-token
-   GITEA_API_URL=https://gitea.example.com
-   ```
 
 #### 创建站点
 
@@ -413,31 +383,24 @@ git push -u origin gh-pages
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         Gitea Server                         │
-│  [推送 gh-pages] → [Webhook] → POST /webhook                │
-│  [删除 gh-pages] → [Webhook] → POST /webhook (delete)      │
+│    每个 hook 的签名投递 → pages.<DOMAIN>/webhook             │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Deployer 容器                             │
-│  • HMAC-SHA256 签名验证                                      │
-│  • 仅处理 gh-pages 分支                                      │
-│  • git clone --single-branch --depth 1 浅克隆               │
-│  • 删除 .git 目录                                           │
-│  • 设置权限 644/755                                         │
-│  • 阻止软链接                                               │
-│  • OAuth2 用户授权                                          │
-│  • 为授权用户自动注册 webhook                                │
-│  • 分支删除时自动清理站点                                   │
+│ Nginx（唯一宿主机端口）→ 私有后端网络 → Deployer              │
+│  • /webhook 和 OAuth 路由只经内部 Deployer                   │
+│  • Nginx 以只读方式提供 Pages 数据                           │
+│  • Deployer 校验每个 hook 的 HMAC 和 Gitea 元数据            │
+│  • Deployer 原子发布不可信静态内容                           │
+│  • Deployer 没有 Docker socket、SSH 密钥或宿主机端口          │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Nginx 容器                                │
-│  • 泛域名路由                                               │
-│  • 根目录站点: username.pages.domain → _root/               │
-│  • 子目录站点: username.pages.domain/repo → repo/           │
-│  • 安全: disable_symlinks, 屏蔽 /.git                       │
+│                      已发布的 Pages 卷                       │
+│  • 根目录: username.pages.domain → _root/                   │
+│  • 子站点: username.pages.domain/repo → repo/               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -451,9 +414,10 @@ git push -u origin gh-pages
 | 阻止软链接 | `disable_symlinks on` + 代码过滤 |
 | 路径遍历防护 | 输入净化 |
 | 删除 .git 目录 | 自动清理 |
-| Webhook 签名验证 | HMAC-SHA256 |
+| Webhook 鉴权 | 每个 hook 独立 key 和 HMAC-SHA256 secret；Gitea 元数据为准 |
 | 站点大小限制 | `MAX_SITE_SIZE_MB` (默认 100MB) |
 | 私有仓库支持 | OAuth2 用户令牌 |
+| 网络暴露 | 仅 Nginx 发布端口；Deployer 仅存在于 Compose 私有网络 |
 
 ### 目录结构
 
