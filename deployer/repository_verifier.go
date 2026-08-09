@@ -86,6 +86,9 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 	if principal.ScopeType != ScopeUser && principal.ScopeType != ScopeOrganization {
 		return nil, ErrRepositoryOutOfScope
 	}
+	if principal.ScopeType == ScopeOrganization && payload.OwnerUsername != principal.ScopeName {
+		return nil, ErrRepositoryOutOfScope
+	}
 	token, err := v.tokenForPrincipal(ctx, principal)
 	if err != nil {
 		return nil, err

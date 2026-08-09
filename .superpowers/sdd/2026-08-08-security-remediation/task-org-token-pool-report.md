@@ -41,3 +41,36 @@ ok      gitea-pages-deployer  3.008s
 git diff --check
 # no output; exit 0
 ```
+
+## Round 1 — early organization-scope rejection
+
+The verifier now rejects an organization-hook payload whose owner differs
+from the authenticated principal's organization before it consults the
+administrator pool or creates a Gitea client. This keeps an untrusted payload
+from causing an otherwise authorized administrator token to be used outside
+its canonical organization scope.
+
+TDD regression evidence:
+
+```text
+Before the guard:
+canonical Gitea requests = 1, want 0
+
+After the guard:
+cd deployer && /usr/local/go/bin/go test . -run TestVerifyOrganizationHookRejectsCrossOwnerBeforeAdministratorTokenFallback -count=1
+ok      gitea-pages-deployer
+```
+
+The test uses a missing original authorizer token plus a valid same-organization
+administrator pool entry, then supplies `victim` as the payload owner. It
+asserts `ErrRepositoryOutOfScope` and zero fake-Gitea requests.
+
+Fresh full verification:
+
+```text
+cd deployer && /usr/local/go/bin/go test . -count=1
+ok      gitea-pages-deployer  0.910s
+
+cd deployer && /usr/local/go/bin/go test -race . -count=1
+ok      gitea-pages-deployer  3.049s
+```

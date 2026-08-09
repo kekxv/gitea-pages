@@ -197,6 +197,39 @@ func TestVerifyOrganizationHookDoesNotUseOtherOrganizationAdministratorToken(t *
 	}
 }
 
+// This test fails if a cross-owner organization payload can trigger either an
+// administrator-pool lookup token or a canonical Gitea request before scope
+// validation rejects it.
+func TestVerifyOrganizationHookRejectsCrossOwnerBeforeAdministratorTokenFallback(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		repo := RepoInfo{ID: 7, Name: "site", FullName: "victim/site", CloneURL: serverCloneURL(r)}
+		repo.Owner.Username = "victim"
+		_ = json.NewEncoder(w).Encode(repo)
+	}))
+	defer server.Close()
+
+	store := newTestTokenStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	store.Set("bob", &UserToken{AccessToken: "administrator-token"})
+	if err := store.PutOrganizationHookAuthorizer(context.Background(), "platform", "bob", "platform-hook"); err != nil {
+		t.Fatalf("save organization administrator: %v", err)
+	}
+	verifier, err := NewRepositoryVerifier(server.URL, store)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+
+	_, err = verifier.Verify(context.Background(), HookPrincipal{Username: "alice", ScopeType: ScopeOrganization, ScopeName: "platform"}, PayloadRepository{ID: 7, Name: "site", OwnerUsername: "victim"})
+	if !errors.Is(err, ErrRepositoryOutOfScope) {
+		t.Fatalf("verify repository error = %v, want %v", err, ErrRepositoryOutOfScope)
+	}
+	if requests != 0 {
+		t.Errorf("canonical Gitea requests = %d, want 0", requests)
+	}
+}
+
 func TestValidateCanonicalCloneURL(t *testing.T) {
 	httpsBase, err := url.Parse("https://gitea.example.com/api/v1")
 	if err != nil {
