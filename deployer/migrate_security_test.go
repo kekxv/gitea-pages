@@ -188,11 +188,14 @@ func TestMigrationEncryptsTokensRotatesUserAndOrganizationHooksAndHidesSecrets(t
 		t.Fatal(err)
 	}
 	defer check.Close()
-	var encryptedRows, hooks, legacyRows int
+	var encryptedRows, hooks, legacyRows, encryptionVersion int
 	if err := check.QueryRow(`SELECT COUNT(*) FROM user_tokens_v2`).Scan(&encryptedRows); err != nil {
 		t.Fatal(err)
 	}
 	if err := check.QueryRow(`SELECT COUNT(*) FROM hook_credentials`).Scan(&hooks); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow(`SELECT encryption_version FROM user_tokens_v2 WHERE username = 'alice'`).Scan(&encryptionVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := check.QueryRow(`SELECT COUNT(*) FROM user_tokens`).Scan(&legacyRows); err == nil || !strings.Contains(err.Error(), "no such table") {
@@ -200,6 +203,9 @@ func TestMigrationEncryptsTokensRotatesUserAndOrganizationHooksAndHidesSecrets(t
 	}
 	if encryptedRows != 1 || hooks != 2 {
 		t.Fatalf("encrypted rows/hooks = %d/%d, want 1/2", encryptedRows, hooks)
+	}
+	if encryptionVersion != tokenCipherAADVersion {
+		t.Fatalf("token encryption version = %d, want %d", encryptionVersion, tokenCipherAADVersion)
 	}
 	manifest, err := os.ReadFile(config.ManifestPath)
 	if err != nil {

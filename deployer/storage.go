@@ -28,6 +28,11 @@ type TokenStore struct {
 	closeErr            error
 }
 
+const (
+	tokenCipherLegacyVersion = 1
+	tokenCipherAADVersion    = 2
+)
+
 // NewTokenStore creates a new encrypted token store with SQLite persistence.
 func NewTokenStore(dataDir string, key []byte) (*TokenStore, error) {
 	cipher, err := NewTokenCipher(key)
@@ -141,7 +146,8 @@ func createSecureStorageSchema(ctx context.Context, tx *sql.Tx) error {
 		refresh_token_ciphertext BLOB,
 		token_type TEXT,
 		expires_at DATETIME,
-		created_at DATETIME NOT NULL
+		created_at DATETIME NOT NULL,
+		encryption_version INTEGER NOT NULL DEFAULT 1
 	);
 	CREATE INDEX IF NOT EXISTS idx_user_tokens_v2_username ON user_tokens_v2(username);
 	CREATE TABLE IF NOT EXISTS hook_credentials (
@@ -174,6 +180,12 @@ func createSecureStorageSchema(ctx context.Context, tx *sql.Tx) error {
 	_, err := tx.ExecContext(ctx, createTableSQL)
 	if err != nil {
 		return fmt.Errorf("create encrypted storage schema: %w", err)
+	}
+	// Version 1 encrypted v2 rows predate owner/field AAD. Keep them readable
+	// long enough to re-key them on startup, rather than silently treating
+	// previously persisted grants as corrupt.
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE user_tokens_v2 ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("add token encryption version: %w", err)
 	}
 	return nil
 }
@@ -226,7 +238,7 @@ func (s *TokenStore) loadFromDB() error {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at
+		SELECT username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at, encryption_version
 		FROM user_tokens_v2
 	`)
 	if err != nil {
@@ -234,12 +246,17 @@ func (s *TokenStore) loadFromDB() error {
 	}
 	defer rows.Close()
 
-	count := 0
+	type storedToken struct {
+		token      UserToken
+		needsRekey bool
+	}
+	var storedTokens []storedToken
 	for rows.Next() {
 		var token UserToken
 		var expiresAt, createdAt sql.NullTime
 		var accessTokenCiphertext []byte
 		var refreshTokenCiphertext []byte
+		var encryptionVersion int
 
 		err := rows.Scan(
 			&token.Username,
@@ -248,21 +265,34 @@ func (s *TokenStore) loadFromDB() error {
 			&token.TokenType,
 			&expiresAt,
 			&createdAt,
+			&encryptionVersion,
 		)
 		if err != nil {
 			return fmt.Errorf("scan token row: %w", err)
 		}
 
-		accessToken, err := s.cipher.Open(accessTokenCiphertext)
+		var accessToken []byte
+		var refreshToken []byte
+		needsRekey := encryptionVersion == tokenCipherLegacyVersion
+		switch encryptionVersion {
+		case tokenCipherLegacyVersion:
+			accessToken, err = s.cipher.Open(accessTokenCiphertext)
+			if err == nil && refreshTokenCiphertext != nil {
+				refreshToken, err = s.cipher.Open(refreshTokenCiphertext)
+			}
+		case tokenCipherAADVersion:
+			accessToken, err = s.cipher.OpenToken(token.Username, tokenFieldAccess, accessTokenCiphertext)
+			if err == nil && refreshTokenCiphertext != nil {
+				refreshToken, err = s.cipher.OpenToken(token.Username, tokenFieldRefresh, refreshTokenCiphertext)
+			}
+		default:
+			return ErrTokenDecrypt
+		}
 		if err != nil {
 			return ErrTokenDecrypt
 		}
 		token.AccessToken = string(accessToken)
 		if refreshTokenCiphertext != nil {
-			refreshToken, err := s.cipher.Open(refreshTokenCiphertext)
-			if err != nil {
-				return ErrTokenDecrypt
-			}
 			token.RefreshToken = string(refreshToken)
 		}
 		if expiresAt.Valid {
@@ -272,20 +302,33 @@ func (s *TokenStore) loadFromDB() error {
 			token.CreatedAt = createdAt.Time
 		}
 
-		tokenCopy := token
-		s.tokens[token.Username] = &tokenCopy
-		count++
+		storedTokens = append(storedTokens, storedToken{token: token, needsRekey: needsRekey})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, stored := range storedTokens {
+		if stored.needsRekey {
+			if err := s.writeToken(&stored.token); err != nil {
+				return fmt.Errorf("re-key legacy encrypted token for %s: %w", stored.token.Username, err)
+			}
+		}
+		tokenCopy := stored.token
+		s.tokens[tokenCopy.Username] = &tokenCopy
 	}
 
-	log.Printf("Loaded %d tokens from database", count)
-	return rows.Err()
+	log.Printf("Loaded %d tokens from database", len(storedTokens))
+	return nil
 }
 
 // Set stores a user token (in memory and database)
 // Username is normalized to lowercase for consistent lookup
-func (s *TokenStore) Set(username string, token *UserToken) {
+func (s *TokenStore) Set(username string, token *UserToken) error {
 	if token == nil {
-		return
+		return fmt.Errorf("token is required")
 	}
 	// Normalize username to lowercase
 	normalizedUsername := strings.ToLower(username)
@@ -296,11 +339,11 @@ func (s *TokenStore) Set(username string, token *UserToken) {
 	defer s.mu.Unlock()
 
 	if err := s.writeToken(&tokenCopy); err != nil {
-		log.Printf("Warning: Failed to save token for user %s: %v", normalizedUsername, err)
-		return
+		return fmt.Errorf("save token for user %s: %w", normalizedUsername, err)
 	}
 	s.tokens[normalizedUsername] = &tokenCopy
 	log.Printf("Token saved to database for user: %s", normalizedUsername)
+	return nil
 }
 
 // UpdateToken atomically replaces one token after applying update to a value copy.
@@ -326,13 +369,13 @@ func (s *TokenStore) writeToken(token *UserToken) error {
 	if s.db == nil || s.cipher == nil {
 		return fmt.Errorf("token storage is unavailable")
 	}
-	accessTokenCiphertext, err := s.cipher.Seal([]byte(token.AccessToken))
+	accessTokenCiphertext, err := s.cipher.SealToken(token.Username, tokenFieldAccess, []byte(token.AccessToken))
 	if err != nil {
 		return fmt.Errorf("encrypt access token: %w", err)
 	}
 	var refreshTokenCiphertext []byte
 	if token.RefreshToken != "" {
-		refreshTokenCiphertext, err = s.cipher.Seal([]byte(token.RefreshToken))
+		refreshTokenCiphertext, err = s.cipher.SealToken(token.Username, tokenFieldRefresh, []byte(token.RefreshToken))
 		if err != nil {
 			return fmt.Errorf("encrypt refresh token: %w", err)
 		}
@@ -350,15 +393,16 @@ func (s *TokenStore) writeToken(token *UserToken) error {
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO user_tokens_v2
-			(username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+			(username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at, encryption_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(username) DO UPDATE SET
 			access_token_ciphertext = excluded.access_token_ciphertext,
 			refresh_token_ciphertext = excluded.refresh_token_ciphertext,
 			token_type = excluded.token_type,
 			expires_at = excluded.expires_at,
-			created_at = excluded.created_at
-	`, token.Username, accessTokenCiphertext, refreshTokenCiphertext, token.TokenType, token.ExpiresAt, token.CreatedAt)
+			created_at = excluded.created_at,
+			encryption_version = excluded.encryption_version
+	`, token.Username, accessTokenCiphertext, refreshTokenCiphertext, token.TokenType, token.ExpiresAt, token.CreatedAt, tokenCipherAADVersion)
 	if err != nil {
 		return err
 	}

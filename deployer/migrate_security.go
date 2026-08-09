@@ -452,13 +452,14 @@ func legacyTokenColumns(ctx context.Context, tx *sql.Tx) (map[string]bool, error
 }
 
 func insertEncryptedMigrationToken(ctx context.Context, tx *sql.Tx, cipher *TokenCipher, token UserToken) error {
-	access, err := cipher.Seal([]byte(token.AccessToken))
+	token.Username = strings.ToLower(token.Username)
+	access, err := cipher.SealToken(token.Username, tokenFieldAccess, []byte(token.AccessToken))
 	if err != nil {
 		return err
 	}
 	var refresh []byte
 	if token.RefreshToken != "" {
-		refresh, err = cipher.Seal([]byte(token.RefreshToken))
+		refresh, err = cipher.SealToken(token.Username, tokenFieldRefresh, []byte(token.RefreshToken))
 		if err != nil {
 			return err
 		}
@@ -466,7 +467,7 @@ func insertEncryptedMigrationToken(ctx context.Context, tx *sql.Tx, cipher *Toke
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = time.Now().UTC()
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO user_tokens_v2 (username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`, token.Username, access, refresh, token.TokenType, nullableTime(token.ExpiresAt), token.CreatedAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO user_tokens_v2 (username, access_token_ciphertext, refresh_token_ciphertext, token_type, expires_at, created_at, encryption_version) VALUES (?, ?, ?, ?, ?, ?, ?)`, token.Username, access, refresh, token.TokenType, nullableTime(token.ExpiresAt), token.CreatedAt, tokenCipherAADVersion)
 	return err
 }
 

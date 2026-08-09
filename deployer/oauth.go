@@ -277,7 +277,16 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if token.ExpiresIn > 0 {
 		userToken.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
-	h.store.Set(userToken.Username, userToken)
+	if h.store == nil {
+		log.Printf("Cannot persist OAuth token: token storage is unavailable")
+		http.Error(w, "Failed to save token", http.StatusInternalServerError)
+		return
+	}
+	if err := h.store.Set(userToken.Username, userToken); err != nil {
+		log.Printf("Failed to persist OAuth token: %v", err)
+		http.Error(w, "Failed to save token", http.StatusInternalServerError)
+		return
+	}
 
 	// Register webhooks asynchronously to avoid timeout for users with many organizations
 	go h.registerWebhooks(userToken)

@@ -456,6 +456,62 @@ func TestCallbackConsumesOAuthStateCookie(t *testing.T) {
 	t.Error("callback did not delete oauth_state cookie")
 }
 
+func TestCallbackFailsClosedWhenTokenPersistenceFails(t *testing.T) {
+	hookRequests := 0
+	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"access"}`))
+		case "/api/v1/user":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		default:
+			hookRequests++
+			http.NotFound(w, r)
+		}
+	}))
+	defer gitea.Close()
+
+	store, err := NewTokenStore(t.TempDir(), bytes.Repeat([]byte("k"), 32))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	h := NewOAuthHandler(&OAuthConfig{
+		ClientID:     "client",
+		ClientSecret: "secret",
+		RedirectURL:  "https://pages.example.com/oauth/callback",
+		TokenURL:     gitea.URL + "/token",
+		APIURL:       gitea.URL,
+	}, store, "https://pages.example.com/webhook", "session-secret")
+	req := httptest.NewRequest(http.MethodGet, "/oauth/callback?state=valid-state&code=code", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	h.HandleCallback(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("callback status = %d, want 500: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "授权成功") {
+		t.Fatalf("callback reported success after persistence failure: %s", w.Body.String())
+	}
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == sessionCookieName {
+			t.Fatal("callback set a session cookie after persistence failure")
+		}
+	}
+	if got := store.Get("alice"); got != nil {
+		t.Fatalf("callback retained an unpersisted token: %#v", got)
+	}
+	if hookRequests != 0 {
+		t.Fatalf("callback started webhook registration after persistence failure (%d requests)", hookRequests)
+	}
+}
+
 func TestStatusEscapesUsernameDomainAndRegistrationError(t *testing.T) {
 	secret := "session-secret"
 	username := "<alice>"
