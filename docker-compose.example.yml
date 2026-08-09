@@ -27,8 +27,8 @@ services:
     cpus: "0.50"
     mem_limit: 128M
     tmpfs:
-      - /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700
-      - /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700
+      - /tmp:rw,nosuid,nodev,noexec,uid=${PUID:-1000},gid=${PGID:-1000},mode=700
+      - /var/cache/nginx:rw,nosuid,nodev,noexec,uid=${PUID:-1000},gid=${PGID:-1000},mode=700
     depends_on:
       deployer:
         condition: service_started
@@ -52,18 +52,18 @@ services:
     secrets:
       - source: session_secret
         target: gitea_pages_session_secret
-        uid: "1000"
-        gid: "1000"
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
         mode: 0400
       - source: token_encryption_key
         target: gitea_pages_token_encryption_key
-        uid: "1000"
-        gid: "1000"
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
         mode: 0400
       - source: oauth_client_secret
         target: gitea_pages_oauth_client_secret
-        uid: "1000"
-        gid: "1000"
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
         mode: 0400
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN must be set to the Pages parent domain}
@@ -94,7 +94,7 @@ services:
     cpus: "1.00"
     mem_limit: 512M
     tmpfs:
-      - /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700,size=256m
+      - /tmp:rw,nosuid,nodev,noexec,uid=${PUID:-1000},gid=${PGID:-1000},mode=700,size=256m
     networks:
       - pages_backend
       - deployer_egress

@@ -18,6 +18,8 @@ TOKEN_ENCRYPTION_KEY_HOST_FILE=$audit_dir/token_encryption_key
 OAUTH_CLIENT_SECRET_HOST_FILE=$audit_dir/oauth_client_secret
 PAGES_DATA_DIR=$audit_dir/pages
 HTTP_PORT=18080
+PUID=1234
+PGID=5678
 EOF
 
 audit_config="$audit_dir/compose.json"
@@ -41,8 +43,11 @@ def require(condition, message):
     if not condition:
         raise SystemExit(message)
 
+runtime_uid = "1234"
+runtime_gid = "5678"
+
 def assert_least_privilege(name, service):
-    require(service.get("user") == "1000:1000", f"{name} must run as the configured non-root user")
+    require(service.get("user") == f"{runtime_uid}:{runtime_gid}", f"{name} must run as the configured non-root user")
     require(service.get("read_only") is True, f"{name} must have a read-only root filesystem")
     require(service.get("cap_drop") == ["ALL"], f"{name} must drop every Linux capability")
     require("no-new-privileges:true" in service.get("security_opt", []), f"{name} must forbid privilege escalation")
@@ -71,13 +76,13 @@ for target in (
 ):
     secret = secrets.get(target)
     require(secret is not None, f"deployer must mount {target} as a Compose secret")
-    require(secret.get("uid") == "1000" and secret.get("gid") == "1000", f"{target} must be owned by the runtime user")
+    require(secret.get("uid") == runtime_uid and secret.get("gid") == runtime_gid, f"{target} must be owned by the runtime user")
     require(secret.get("mode") == "0400", f"{target} must be read-only to the runtime user")
 
 require("WEBHOOK_SECRET" not in deployer.get("environment", {}), "deployer must not receive a webhook secret environment value")
 require("GITEA_SSH_KEY_PATH" not in deployer.get("environment", {}), "deployer must not receive an SSH key path")
-require(any(mount.startswith("/tmp:") and "noexec" in mount for mount in deployer.get("tmpfs", [])), "deployer must have a noexec /tmp tmpfs")
+require(any(mount.startswith("/tmp:") and f"uid={runtime_uid}" in mount and f"gid={runtime_gid}" in mount and "noexec" in mount for mount in deployer.get("tmpfs", [])), "deployer must have a noexec /tmp tmpfs owned by the runtime user")
 require(any(mount.startswith("/tmp:") and "size=256m" in mount for mount in deployer.get("tmpfs", [])), "deployer /tmp must have a 256 MiB size limit")
-require(any(mount.startswith("/tmp:") and "noexec" in mount for mount in nginx.get("tmpfs", [])), "nginx must have a noexec /tmp tmpfs")
-require(any(mount.startswith("/var/cache/nginx:") and "noexec" in mount for mount in nginx.get("tmpfs", [])), "nginx must have a noexec cache tmpfs")
+require(any(mount.startswith("/tmp:") and f"uid={runtime_uid}" in mount and f"gid={runtime_gid}" in mount and "noexec" in mount for mount in nginx.get("tmpfs", [])), "nginx must have a noexec /tmp tmpfs owned by the runtime user")
+require(any(mount.startswith("/var/cache/nginx:") and f"uid={runtime_uid}" in mount and f"gid={runtime_gid}" in mount and "noexec" in mount for mount in nginx.get("tmpfs", [])), "nginx must have a noexec cache tmpfs owned by the runtime user")
 PY
