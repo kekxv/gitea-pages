@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVerifyRepositoryRejectsUserHookForDifferentOwner(t *testing.T) {
@@ -81,6 +82,118 @@ func TestVerifyRepositoryUsesPrincipalTokenAndCanonicalMetadata(t *testing.T) {
 	}
 	if got, want := verified.SizeBytes, int64(12*1024); got != want {
 		t.Fatalf("size bytes = %d, want %d", got, want)
+	}
+}
+
+// This test fails if an authenticated organization hook cannot continue with
+// another administrator that previously authorized that same hook scope.
+func TestVerifyOrganizationHookUsesValidAuthorizedAdministratorWhenPrincipalTokenUnavailable(t *testing.T) {
+	var receivedAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthorization = r.Header.Get("Authorization")
+		repo := RepoInfo{ID: 7, Name: "site", FullName: "platform/site", CloneURL: serverCloneURL(r)}
+		repo.Owner.Username = "platform"
+		_ = json.NewEncoder(w).Encode(repo)
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name           string
+		principalToken *UserToken
+	}{
+		{name: "expired token", principalToken: &UserToken{AccessToken: "expired-principal-token", ExpiresAt: time.Now().Add(-time.Minute)}},
+		{name: "missing token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			receivedAuthorization = ""
+			store := newTestTokenStore(t)
+			t.Cleanup(func() { _ = store.Close() })
+			if test.principalToken != nil {
+				store.Set("alice", test.principalToken)
+			}
+			store.Set("bob", &UserToken{AccessToken: "administrator-token"})
+			if err := store.PutOrganizationHookAuthorizer(context.Background(), "platform", "alice", "platform-hook"); err != nil {
+				t.Fatalf("save original administrator: %v", err)
+			}
+			if err := store.PutOrganizationHookAuthorizer(context.Background(), "platform", "bob", "platform-hook"); err != nil {
+				t.Fatalf("save replacement administrator: %v", err)
+			}
+			verifier, err := NewRepositoryVerifier(server.URL, store)
+			if err != nil {
+				t.Fatalf("new verifier: %v", err)
+			}
+
+			verified, err := verifier.Verify(context.Background(), HookPrincipal{Username: "alice", ScopeType: ScopeOrganization, ScopeName: "platform"}, PayloadRepository{ID: 7, Name: "site", OwnerUsername: "platform"})
+			if err != nil {
+				t.Fatalf("verify repository: %v", err)
+			}
+			if got, want := receivedAuthorization, "Bearer administrator-token"; got != want {
+				t.Errorf("repository lookup authorization = %q, want %q", got, want)
+			}
+			if got, want := verified.AccessToken, "administrator-token"; got != want {
+				t.Errorf("verified repository access token = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// This test fails if a user-scoped hook can borrow an organization
+// administrator token when its own token is unavailable.
+func TestVerifyUserHookDoesNotFallBackToOrganizationAdministratorToken(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected repository lookup", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	store := newTestTokenStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	store.Set("bob", &UserToken{AccessToken: "administrator-token"})
+	if err := store.PutOrganizationHookAuthorizer(context.Background(), "alice", "bob", "alice-hook"); err != nil {
+		t.Fatalf("save organization administrator: %v", err)
+	}
+	verifier, err := NewRepositoryVerifier(server.URL, store)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+
+	_, err = verifier.Verify(context.Background(), HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}, PayloadRepository{ID: 7, Name: "site", OwnerUsername: "alice"})
+	if !errors.Is(err, ErrRepositoryAccess) {
+		t.Fatalf("verify repository error = %v, want %v", err, ErrRepositoryAccess)
+	}
+	if requests != 0 {
+		t.Errorf("repository lookup requests = %d, want 0", requests)
+	}
+}
+
+// This test fails if an organization hook can borrow an administrator token
+// that authorized a different organization.
+func TestVerifyOrganizationHookDoesNotUseOtherOrganizationAdministratorToken(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected repository lookup", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	store := newTestTokenStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	store.Set("mallory", &UserToken{AccessToken: "other-organization-token"})
+	if err := store.PutOrganizationHookAuthorizer(context.Background(), "other-organization", "mallory", "other-hook"); err != nil {
+		t.Fatalf("save other organization administrator: %v", err)
+	}
+	verifier, err := NewRepositoryVerifier(server.URL, store)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+
+	_, err = verifier.Verify(context.Background(), HookPrincipal{Username: "alice", ScopeType: ScopeOrganization, ScopeName: "platform"}, PayloadRepository{ID: 7, Name: "site", OwnerUsername: "platform"})
+	if !errors.Is(err, ErrRepositoryAccess) {
+		t.Fatalf("verify repository error = %v, want %v", err, ErrRepositoryAccess)
+	}
+	if requests != 0 {
+		t.Errorf("repository lookup requests = %d, want 0", requests)
 	}
 }
 

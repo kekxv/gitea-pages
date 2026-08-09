@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 var (
@@ -53,8 +54,9 @@ type RepositoryVerifier interface {
 }
 
 // GiteaRepositoryVerifier resolves untrusted webhook repository references
-// through the configured Gitea API using only the authenticated principal's
-// OAuth token.
+// through the configured Gitea API using the authenticated principal's OAuth
+// token, or for organization hooks only, another stored administrator that
+// authorized the same organization hook scope.
 type GiteaRepositoryVerifier struct {
 	apiBase    *url.URL
 	tokenStore *TokenStore
@@ -81,12 +83,18 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 	if principal.Username == "" {
 		return nil, ErrRepositoryAccess
 	}
-	token := v.tokenStore.Get(principal.Username)
-	if token == nil || token.AccessToken == "" {
+	if principal.ScopeType != ScopeUser && principal.ScopeType != ScopeOrganization {
+		return nil, ErrRepositoryOutOfScope
+	}
+	token, err := v.tokenForPrincipal(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
 		return nil, ErrRepositoryAccess
 	}
 
-	client := NewGiteaClient(v.apiBase.String(), token.AccessToken)
+	client := NewGiteaClient(v.apiBase.String(), token)
 	repo, err := client.GetRepoInfoContext(ctx, payload.OwnerUsername, payload.Name)
 	if err != nil {
 		return nil, fmt.Errorf("fetch canonical repository: %w", err)
@@ -96,9 +104,6 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 	}
 	if repo.ID != payload.ID || repo.Owner.Username != payload.OwnerUsername || repo.Name != payload.Name {
 		return nil, ErrRepositoryMismatch
-	}
-	if principal.ScopeType != ScopeUser && principal.ScopeType != ScopeOrganization {
-		return nil, ErrRepositoryOutOfScope
 	}
 	if repo.Owner.Username != principal.ScopeName {
 		return nil, ErrRepositoryOutOfScope
@@ -115,8 +120,40 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 		CloneURL:    cloneURL,
 		Private:     repo.Private,
 		SizeBytes:   repo.Size * 1024,
-		AccessToken: token.AccessToken,
+		AccessToken: token,
 	}, nil
+}
+
+// tokenForPrincipal allows organization hooks to survive an unavailable
+// original authorizer token by using a currently valid administrator from the
+// persistent pool for that organization. User hooks always remain bound to
+// their own principal token.
+func (v *GiteaRepositoryVerifier) tokenForPrincipal(ctx context.Context, principal HookPrincipal) (string, error) {
+	if token := v.usableToken(principal.Username); token != "" {
+		return token, nil
+	}
+	if principal.ScopeType != ScopeOrganization {
+		return "", nil
+	}
+
+	authorizers, err := v.tokenStore.OrganizationHookAuthorizers(ctx, principal.ScopeName)
+	if err != nil {
+		return "", fmt.Errorf("load organization hook authorizers: %w", err)
+	}
+	for _, username := range authorizers {
+		if token := v.usableToken(username); token != "" {
+			return token, nil
+		}
+	}
+	return "", nil
+}
+
+func (v *GiteaRepositoryVerifier) usableToken(username string) string {
+	token := v.tokenStore.Get(username)
+	if token == nil || token.AccessToken == "" || (!token.ExpiresAt.IsZero() && !token.ExpiresAt.After(time.Now())) {
+		return ""
+	}
+	return token.AccessToken
 }
 
 // DecodeWebhook extracts only fields that are later verified against Gitea.
