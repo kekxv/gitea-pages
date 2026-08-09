@@ -14,8 +14,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -254,6 +256,52 @@ func securityE2EAssertSentinels(t *testing.T, sentinels map[string][]byte) {
 	}
 }
 
+type securityE2ETreeEntry struct {
+	mode     os.FileMode
+	contents []byte
+	target   string
+}
+
+func securityE2ESnapshotPagesTree(t *testing.T, root string) map[string]securityE2ETreeEntry {
+	t.Helper()
+	snapshot := make(map[string]securityE2ETreeEntry)
+	if err := filepath.WalkDir(root, func(path string, _ os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entry := securityE2ETreeEntry{mode: info.Mode()}
+		switch {
+		case info.Mode().IsRegular():
+			entry.contents, err = os.ReadFile(path)
+		case info.Mode()&os.ModeSymlink != 0:
+			entry.target, err = os.Readlink(path)
+		}
+		if err != nil {
+			return err
+		}
+		snapshot[filepath.ToSlash(relative)] = entry
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func securityE2EAssertPagesTreeUnchanged(t *testing.T, before map[string]securityE2ETreeEntry, root string) {
+	t.Helper()
+	if after := securityE2ESnapshotPagesTree(t, root); !reflect.DeepEqual(after, before) {
+		t.Fatalf("Pages tree changed after rejected delivery: before = %#v, after = %#v", before, after)
+	}
+}
+
 // This would fail if a hook key could be paired with another tenant's secret,
 // or if signed payload fields could select a private repository outside the
 // authenticated hook principal's scope.
@@ -261,7 +309,8 @@ func TestSecurityE2ECrossTenantPrivateRepositoryNeverReachesGit(t *testing.T) {
 	f := newSecurityE2EFixture(t)
 	f.addRepo(11, "alice", "private", true)
 	f.addRepo(22, "bob", "site", false)
-	sentinels := securityE2EWriteSentinels(t, f.pages)
+	securityE2EWriteSentinels(t, f.pages)
+	pagesBefore := securityE2ESnapshotPagesTree(t, f.pages)
 	body := securityE2EWebhookBody("push", "alice", "private", 11, `,"clone_url":"https://attacker.invalid/steal.git","private":false`)
 
 	wrongSecret := f.deliver("push", "alice-hook", "bob-secret", "tenant-wrong-secret", body)
@@ -275,10 +324,7 @@ func TestSecurityE2ECrossTenantPrivateRepositoryNeverReachesGit(t *testing.T) {
 	if got := securityE2EGitInvocations(t, f.gitMarker); len(got) != 0 {
 		t.Fatalf("Git ran for rejected cross-tenant deliveries: %v", got)
 	}
-	if _, err := os.Stat(filepath.Join(f.pages, "bob", "alice")); !os.IsNotExist(err) {
-		t.Fatalf("Alice content appeared below Bob's Pages directory: %v", err)
-	}
-	securityE2EAssertSentinels(t, sentinels)
+	securityE2EAssertPagesTreeUnchanged(t, pagesBefore, f.pages)
 }
 
 // This would fail if malformed or colliding repository metadata reached a
@@ -355,7 +401,9 @@ func TestSecurityE2ERejectsUnsafeCloneTransportsBeforeGit(t *testing.T) {
 // origin, then trusted its response as though it were from configured Gitea.
 func TestSecurityE2ERejectsRepositoryAPIRedirectBeforeGit(t *testing.T) {
 	f := newSecurityE2EFixture(t)
+	var foreignRedirectRequests atomic.Int64
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignRedirectRequests.Add(1)
 		_ = json.NewEncoder(w).Encode(securityE2ECanonicalRepository(7, "alice", "site", f.cloneOriginURL+"/alice/site.git", true))
 	}))
 	defer foreign.Close()
@@ -363,7 +411,11 @@ func TestSecurityE2ERejectsRepositoryAPIRedirectBeforeGit(t *testing.T) {
 	f.gitea.redirectURL = foreign.URL + "/api/v1/repos/alice/site"
 	f.gitea.mu.Unlock()
 	response := f.deliver("push", "alice-hook", "alice-secret", "transport-redirect", securityE2EWebhookBody("push", "alice", "site", 7, ""))
-	if got, want := responseStatus(t, response), http.StatusForbidden; got != want {
+	status := responseStatus(t, response)
+	if got := foreignRedirectRequests.Load(); got != 0 {
+		t.Fatalf("foreign redirect endpoint received %d requests, want 0", got)
+	}
+	if got, want := status, http.StatusForbidden; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
 	}
 	if got := securityE2EGitInvocations(t, f.gitMarker); len(got) != 0 {
