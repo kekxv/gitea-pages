@@ -300,10 +300,5 @@ func (g *GitOperations) RemoveSite(target SiteTarget) error {
 	if err := g.validateTarget(target); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(target.Path()); os.IsNotExist(err) {
-		return nil // Directory doesn't exist, nothing to remove
-	} else if err != nil {
-		return err
-	}
-	return os.RemoveAll(target.Path())
+	return removeSiteSecurely(target)
 }

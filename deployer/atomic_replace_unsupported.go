@@ -15,3 +15,7 @@ func replaceSiteAtomicallyWithExchange(string, SiteTarget, exchangeSitePathsFunc
 func ensureSecurePublicationParent(SiteTarget) error {
 	return ErrAtomicPublicationUnsupported
 }
+
+func removeSiteSecurely(SiteTarget) error {
+	return ErrSecureDeletionUnsupported
+}

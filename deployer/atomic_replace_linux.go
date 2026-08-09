@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -64,6 +66,103 @@ func ensureSecurePublicationParent(target SiteTarget) error {
 		return fmt.Errorf("open deployment owner directory: %w", err)
 	}
 	return unix.Close(ownerFD)
+}
+
+// removeSiteSecurely removes a site by names relative to a retained owner
+// descriptor. The descriptor continues to identify the trusted owner even if
+// an attacker later substitutes a symlink into the original path.
+func removeSiteSecurely(target SiteTarget) error {
+	return removeSiteSecurelyWithAfterParentOpen(target, nil)
+}
+
+// removeSiteSecurelyWithAfterParentOpen has an internal hook so the
+// post-validation substitution regression can exercise the exact window that
+// descriptor-relative deletion closes. Production callers always pass nil.
+func removeSiteSecurelyWithAfterParentOpen(target SiteTarget, afterParentOpen func() error) error {
+	parentFD, err := openTrustedPublicationParent(target)
+	if err != nil {
+		return normalizeSecureDeletionError(err)
+	}
+	defer unix.Close(parentFD)
+
+	if afterParentOpen != nil {
+		if err := afterParentOpen(); err != nil {
+			return err
+		}
+	}
+
+	targetName := filepath.Base(target.Path())
+	for attempts := 0; attempts < 16; attempts++ {
+		tombstoneName, err := secureDeletionTombstoneName()
+		if err != nil {
+			return fmt.Errorf("generate deletion tombstone name: %w", err)
+		}
+		err = unix.Renameat2(parentFD, targetName, parentFD, tombstoneName, unix.RENAME_NOREPLACE)
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("move site into deletion tombstone: %w", normalizeSecureDeletionError(err))
+		}
+		if err := removeSiteEntryAt(parentFD, tombstoneName); err != nil {
+			return fmt.Errorf("remove site deletion tombstone: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("generate unique deletion tombstone: %w", ErrUnsafeSiteTarget)
+}
+
+func secureDeletionTombstoneName() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return ".deleting-" + hex.EncodeToString(random[:]), nil
+}
+
+// removeSiteEntryAt recursively removes a single entry using directory file
+// descriptors only. Fstatat and Openat2 both refuse to resolve symlinks; a
+// symlink (or any other non-directory) is unlinked as the entry itself.
+func removeSiteEntryAt(parentFD int, name string) error {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return unix.Unlinkat(parentFD, name, 0)
+	}
+
+	childFD, err := unix.Openat2(parentFD, name, &unix.OpenHow{
+		Flags:   uint64(secureDirectoryFlags),
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH,
+	})
+	if err != nil {
+		return normalizeSecureDeletionError(err)
+	}
+	directory := os.NewFile(uintptr(childFD), "site-deletion")
+	entries, readErr := directory.ReadDir(-1)
+	if readErr == nil {
+		for _, entry := range entries {
+			if err := removeSiteEntryAt(childFD, entry.Name()); err != nil {
+				readErr = err
+				break
+			}
+		}
+	}
+	closeErr := directory.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
 }
 
 func securePublicationEntries(staging string, target SiteTarget) (int, string, string, string, bool, error) {
@@ -188,6 +287,13 @@ func normalizeSecureDirectoryOpenError(subject string, err error) error {
 	}
 	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.EXDEV) {
 		return fmt.Errorf("%s: %w", subject, ErrUnsafeSiteTarget)
+	}
+	return err
+}
+
+func normalizeSecureDeletionError(err error) error {
+	if errors.Is(err, ErrAtomicPublicationUnsupported) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) {
+		return fmt.Errorf("%w: %v", ErrSecureDeletionUnsupported, err)
 	}
 	return err
 }
