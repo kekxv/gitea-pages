@@ -32,6 +32,12 @@ printf 'Alice root site\n' > "$pages_dir/alice/_root/index.html"
 printf 'Alice project site\n' > "$pages_dir/alice/project/index.html"
 
 grep -Eq '^FROM nginx:1\.29-alpine@sha256:[0-9a-f]{64}$' nginx/Dockerfile
+# Generic CI/buildx image builds do not necessarily provide Compose's required
+# DOMAIN build argument. They must still produce a safe image whose baked
+# domain cannot accidentally route a real deployment.
+docker build -t "${image}-default-domain" ./nginx
+default_nginx="$(docker run --rm "${image}-default-domain" nginx -T 2>&1)"
+grep -Fq 'pages.invalid' <<<"$default_nginx"
 docker build --build-arg PAGES_DOMAIN=example.com -t "$image" ./nginx
 
 docker run --rm --read-only --user 1000:1000 --cap-drop ALL \

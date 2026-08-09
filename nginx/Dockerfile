@@ -4,7 +4,10 @@ FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e591939
 
 ARG PUID=1000
 ARG PGID=1000
-ARG PAGES_DOMAIN
+# Compose always supplies the real domain.  A reserved invalid domain keeps
+# standalone buildx/CI builds reproducible without creating a usable default
+# virtual host when the build argument is omitted.
+ARG PAGES_DOMAIN=pages.invalid
 
 RUN mkdir -p /var/www/pages /var/cache/nginx && \
     addgroup -g "${PGID}" -S pagesgroup && \
