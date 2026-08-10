@@ -93,6 +93,10 @@ func createHookCredential(principal HookPrincipal) (HookCredential, error) {
 	}, nil
 }
 
+func hookDisplayName(principal HookPrincipal) string {
+	return "Gitea Pages (" + string(principal.ScopeType) + ": " + principal.ScopeName + ")"
+}
+
 // HandleStart starts the OAuth2 authorization flow
 func (h *OAuthHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 	// Show authorization confirmation page first
@@ -711,6 +715,7 @@ type webhookConfig struct {
 // webhookInfo represents webhook info from API
 type webhookInfo struct {
 	ID                  int64         `json:"id"`
+	Name                string        `json:"name"`
 	Type                string        `json:"type"`
 	Config              webhookConfig `json:"config"`
 	Events              []string      `json:"events"`
@@ -884,6 +889,9 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 			return fmt.Errorf("load existing hook credential: %w", err)
 		}
 		if stored != nil && stored.ScopeType == principal.ScopeType && stored.ScopeName == principal.ScopeName {
+			if err := h.updateScopedHook(token, principal, existing.ID, h.hookPayload(*stored)); err != nil {
+				return fmt.Errorf("resynchronize existing hook credentials: %w", err)
+			}
 			if principal.ScopeType == ScopeOrganization {
 				if err := h.store.PutOrganizationHookAuthorizer(ctx, principal.ScopeName, principal.Username, stored.Key); err != nil {
 					return fmt.Errorf("save organization hook authorizer: %w", err)
@@ -927,6 +935,7 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 
 func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interface{} {
 	return map[string]interface{}{
+		"name": hookDisplayName(credential.Principal()),
 		"type": "gitea",
 		"config": map[string]string{
 			"url":          h.webhookURL,
@@ -1043,6 +1052,7 @@ func (h *OAuthHandler) rollbackScopedHook(token string, principal HookPrincipal,
 		return nil
 	}
 	payload := map[string]interface{}{
+		"name":                 previous.Name,
 		"type":                 previous.Type,
 		"config":               previous.Config,
 		"events":               previous.Events,

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,7 @@ func TestRegistrationDeletesNewGiteaHookWhenCredentialStorageFails(t *testing.T)
 func TestRegisterWebhooksCreatesAndStoresDistinctUserAndOrganizationCredentials(t *testing.T) {
 	type registration struct {
 		Path                string
+		Name                string
 		AuthorizationHeader string
 		Secret              string
 	}
@@ -159,12 +161,13 @@ func TestRegisterWebhooksCreatesAndStoresDistinctUserAndOrganizationCredentials(
 		case r.Method == http.MethodPost:
 			var payload struct {
 				Config              map[string]string `json:"config"`
+				Name                string            `json:"name"`
 				AuthorizationHeader string            `json:"authorization_header"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode registration: %v", err)
 			}
-			registrations = append(registrations, registration{r.URL.Path, payload.AuthorizationHeader, payload.Config["secret"]})
+			registrations = append(registrations, registration{r.URL.Path, payload.Name, payload.AuthorizationHeader, payload.Config["secret"]})
 			json.NewEncoder(w).Encode(webhookInfo{ID: int64(100 + len(registrations))})
 		default:
 			http.NotFound(w, r)
@@ -187,6 +190,13 @@ func TestRegisterWebhooksCreatesAndStoresDistinctUserAndOrganizationCredentials(
 	}
 
 	for _, registered := range registrations {
+		wantName := map[string]string{
+			"/api/v1/user/hooks":          "Gitea Pages (user: alice)",
+			"/api/v1/orgs/platform/hooks": "Gitea Pages (organization: platform)",
+		}[registered.Path]
+		if got := registered.Name; got != wantName {
+			t.Errorf("webhook name for %s = %q, want %q", registered.Path, got, wantName)
+		}
 		const prefix = "Gitea-Pages "
 		if len(registered.AuthorizationHeader) <= len(prefix) || registered.AuthorizationHeader[:len(prefix)] != prefix {
 			t.Fatalf("Authorization header = %q, want Gitea-Pages key", registered.AuthorizationHeader)
@@ -208,6 +218,68 @@ func TestRegisterWebhooksCreatesAndStoresDistinctUserAndOrganizationCredentials(
 	}
 	if registrations[0].AuthorizationHeader == registrations[1].AuthorizationHeader || registrations[0].Secret == registrations[1].Secret {
 		t.Fatal("user and organization hooks must not share credentials")
+	}
+}
+
+func TestRegisterUserWebhookResynchronizesExistingSecureCredentials(t *testing.T) {
+	credential := HookCredential{
+		Key:               "existing-user-hook-key",
+		Secret:            []byte("existing-user-hook-secret"),
+		PrincipalUsername: "alice",
+		ScopeType:         ScopeUser,
+		ScopeName:         "alice",
+		GiteaHookID:       81,
+	}
+	authorization := "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(credential.Key))
+	var patch map[string]interface{}
+	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/hooks":
+			_ = json.NewEncoder(w).Encode([]webhookInfo{{ID: credential.GiteaHookID, Config: webhookConfig{URL: "https://pages.example.com/webhook"}, AuthorizationHeader: authorization}})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/user/hooks/81":
+			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode hook name update: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gitea.Close()
+
+	store, err := NewTokenStore(t.TempDir(), bytes.Repeat([]byte("k"), 32))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.PutHook(context.Background(), credential); err != nil {
+		t.Fatalf("store existing credential: %v", err)
+	}
+	h := NewOAuthHandler(&OAuthConfig{APIURL: gitea.URL, DisableOrganizationHooks: true}, store, "https://pages.example.com/webhook", "session-secret")
+
+	if err := h.registerUserWebhook("alice-token", "alice"); err != nil {
+		t.Fatalf("register user webhook: %v", err)
+	}
+	wantPatch := map[string]interface{}{
+		"name": "Gitea Pages (user: alice)",
+		"type": "gitea",
+		"config": map[string]interface{}{
+			"url": "https://pages.example.com/webhook", "content_type": "json", "secret": string(credential.Secret),
+		},
+		"events":               []interface{}{"push", "delete"},
+		"active":               true,
+		"branch_filter":        "gh-pages",
+		"authorization_header": authorization,
+	}
+	if !reflect.DeepEqual(patch, wantPatch) {
+		t.Errorf("credential resynchronization payload = %#v, want %#v", patch, wantPatch)
+	}
+	stored, err := store.GetHook(context.Background(), credential.Key)
+	if err != nil || stored == nil {
+		t.Fatalf("load existing credential = %#v, %v", stored, err)
+	}
+	if got, want := string(stored.Secret), string(credential.Secret); got != want {
+		t.Errorf("stored secret = %q, want unchanged %q", got, want)
 	}
 }
 
@@ -265,6 +337,7 @@ func TestRegisteredHookAuthenticatesSignedDelivery(t *testing.T) {
 func TestOrganizationRegistrationPreservesAuthorizedAdministratorPool(t *testing.T) {
 	var hooks []webhookInfo
 	created := 0
+	resynchronized := 0
 	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/orgs/platform/hooks":
@@ -278,8 +351,15 @@ func TestOrganizationRegistrationPreservesAuthorizedAdministratorPool(t *testing
 			hooks = []webhookInfo{payload}
 			created++
 			json.NewEncoder(w).Encode(payload)
-		case r.Method == http.MethodPatch:
-			t.Fatal("a later organization authorizer must not replace the existing hook")
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/orgs/platform/hooks/61":
+			var payload webhookInfo
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode hook resynchronization: %v", err)
+			}
+			payload.ID = 61
+			hooks = []webhookInfo{payload}
+			resynchronized++
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -300,6 +380,9 @@ func TestOrganizationRegistrationPreservesAuthorizedAdministratorPool(t *testing
 	}
 	if got, want := created, 1; got != want {
 		t.Errorf("organization hook creations = %d, want %d", got, want)
+	}
+	if got, want := resynchronized, 1; got != want {
+		t.Errorf("organization hook resynchronizations = %d, want %d", got, want)
 	}
 	admins, err := store.OrganizationHookAuthorizers(context.Background(), "platform")
 	if err != nil {

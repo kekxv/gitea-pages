@@ -82,6 +82,7 @@ type legacyHookRollbackRecord struct {
 	ScopeType           HookScope `json:"scope_type"`
 	ScopeName           string    `json:"scope_name"`
 	GiteaHookID         int64     `json:"gitea_hook_id"`
+	Name                string    `json:"name"`
 	URL                 string    `json:"url"`
 	ContentType         string    `json:"content_type"`
 	Events              []string  `json:"events"`
@@ -570,7 +571,7 @@ func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaCli
 		// no remote mutation occurred.
 		record := legacyHookRollbackRecord{
 			GiteaAPIURL: client.apiURL, AccessToken: accessToken, ScopeType: principal.ScopeType, ScopeName: principal.ScopeName,
-			GiteaHookID: hook.ID, URL: hook.Config.URL, ContentType: hook.Config.ContentType, Events: hook.Events,
+			GiteaHookID: hook.ID, Name: hook.Name, URL: hook.Config.URL, ContentType: hook.Config.ContentType, Events: hook.Events,
 			Active: hook.Active, BranchFilter: hook.BranchFilter, AuthorizationHeader: hook.AuthorizationHeader,
 		}
 		manifest.Hooks = append(manifest.Hooks, record)
@@ -594,6 +595,7 @@ func rotateLegacyHooks(ctx context.Context, tx *sql.Tx, client migrationGiteaCli
 
 func secureHookPayload(webhookURL string, credential HookCredential) map[string]interface{} {
 	return map[string]interface{}{
+		"name": hookDisplayName(credential.Principal()),
 		"type": "gitea", "config": map[string]string{"url": webhookURL, "content_type": "json", "secret": string(credential.Secret)},
 		"events": []string{"push", "delete"}, "active": true, "branch_filter": "gh-pages",
 		"authorization_header": "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(credential.Key)),
@@ -850,7 +852,7 @@ func (c migrationGiteaClient) updateHook(ctx context.Context, token string, prin
 func (c migrationGiteaClient) restoreLegacyHook(ctx context.Context, hook legacyHookRollbackRecord, secret []byte) error {
 	principal := HookPrincipal{ScopeType: hook.ScopeType, ScopeName: hook.ScopeName}
 	payload := map[string]interface{}{
-		"type": "gitea", "config": map[string]string{"url": hook.URL, "content_type": hook.ContentType, "secret": string(secret)},
+		"name": hook.Name, "type": "gitea", "config": map[string]string{"url": hook.URL, "content_type": hook.ContentType, "secret": string(secret)},
 		"events": hook.Events, "active": hook.Active, "branch_filter": hook.BranchFilter, "authorization_header": hook.AuthorizationHeader,
 	}
 	return c.updateHook(ctx, hook.AccessToken, principal, hook.GiteaHookID, payload)

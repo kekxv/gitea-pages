@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -210,6 +213,36 @@ func TestHandleWebhookRejectsUnknownAndBearerKeysBeforeDeployment(t *testing.T) 
 	}
 	if got := fixture.deployments.deploymentCount(); got != 0 {
 		t.Fatalf("Git deployment invoked %d times for rejected authorization", got)
+	}
+}
+
+func TestHandleWebhookLogsSafeAuthenticationFailureCategory(t *testing.T) {
+	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
+	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(7, "alice", "site", "http://127.0.0.1/alice/site.git", false))
+	body := webhookBody(t, "refs/heads/gh-pages", "commit", "alice", "site", 7, "")
+	request := signedHookRequest(body, fixture.credential.Key, fixture.credential.Secret, "delivery-bad-authorization")
+	request.Header.Set("Authorization", "Bearer do-not-log-this-value")
+
+	var logs bytes.Buffer
+	previousOutput, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
+	})
+
+	response := dispatchWebhook(t, fixture.deployer, request, "push")
+	if got, want := response.Code, http.StatusUnauthorized; got != want {
+		t.Fatalf("status = %d, want %d", got, want)
+	}
+	if got, want := logs.String(), "Webhook authentication failed: invalid authorization\n"; got != want {
+		t.Errorf("log output = %q, want %q", got, want)
+	}
+	if strings.Contains(logs.String(), "do-not-log-this-value") {
+		t.Fatal("authentication failure log leaked the Authorization header")
 	}
 }
 
