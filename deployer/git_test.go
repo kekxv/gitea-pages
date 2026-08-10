@@ -32,6 +32,29 @@ exit 43
 	}
 }
 
+// This test fails if an authenticated clone creates its askpass executable in
+// the temporary checkout directory, which is mounted noexec in production.
+func TestGitCloneUsesImageAskPassForToken(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "askpass-path")
+	gitBinary := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\nprintf '%s' \"$GIT_ASKPASS\" > " + shellQuote(marker) + "\n[ \"$" + gitAskPassTokenEnv + "\" = token-value ]\n"
+	if err := os.WriteFile(gitBinary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneURL := mustHTTPSURL(t, "https://gitea.example.com/alice/site.git")
+	if err := runGitClone(context.Background(), gitBinary, cloneURL, filepath.Join(t.TempDir(), "repository"), "token-value"); err != nil {
+		t.Fatalf("runGitClone() error = %v", err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/usr/local/lib/gitea-pages/git-askpass"; string(got) != want {
+		t.Fatalf("GIT_ASKPASS = %q, want image helper %q", got, want)
+	}
+}
+
 // This would fail if a set-ID or sticky checkout entry were normalized and
 // published instead of rejected before it reaches staging.
 func TestCopyFilesRejectsSetIDAndStickyModes(t *testing.T) {

@@ -12,10 +12,14 @@ import (
 	"time"
 )
 
-const gitAskPassTokenEnv = "GITEA_PAGES_GIT_TOKEN"
+const (
+	gitAskPassTokenEnv = "GITEA_PAGES_GIT_TOKEN"
+	gitAskPassPath     = "/usr/local/lib/gitea-pages/git-askpass"
+)
 
 // runGitClone runs a shallow HTTPS clone under the supplied deadline. Tokens
-// are provided only to a short-lived askpass helper, never in argv or URLs.
+// are provided only through the child process environment to the image askpass
+// helper, never in argv or URLs.
 func runGitClone(ctx context.Context, gitBinary string, cloneURL *url.URL, targetDir, token string) error {
 	if cloneURL == nil || cloneURL.Scheme != "https" || cloneURL.Host == "" || cloneURL.User != nil || cloneURL.RawQuery != "" || cloneURL.Fragment != "" {
 		return fmt.Errorf("invalid HTTPS clone URL")
@@ -41,12 +45,7 @@ func runGitClone(ctx context.Context, gitBinary string, cloneURL *url.URL, targe
 		"GIT_LFS_SKIP_SMUDGE=1",
 	}
 	if token != "" {
-		askPass, err := writeGitAskPass(filepath.Dir(targetDir))
-		if err != nil {
-			return err
-		}
-		defer os.Remove(askPass)
-		cmd.Env = append(cmd.Env, "GIT_ASKPASS="+askPass, gitAskPassTokenEnv+"="+token)
+		cmd.Env = append(cmd.Env, "GIT_ASKPASS="+gitAskPassPath, gitAskPassTokenEnv+"="+token)
 	}
 
 	output, err := cmd.CombinedOutput()
@@ -57,15 +56,6 @@ func runGitClone(ctx context.Context, gitBinary string, cloneURL *url.URL, targe
 		return fmt.Errorf("git clone failed: %w, output: %s", err, SanitizeGitOutput(string(output)))
 	}
 	return nil
-}
-
-func writeGitAskPass(dir string) (string, error) {
-	path := filepath.Join(dir, ".git-askpass")
-	contents := "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$" + gitAskPassTokenEnv + "\" ;;\n  *) printf '\\n' ;;\nesac\n"
-	if err := os.WriteFile(path, []byte(contents), 0700); err != nil {
-		return "", fmt.Errorf("create git askpass helper: %w", err)
-	}
-	return path, nil
 }
 
 // GitOperations handles git clone and deployment operations
@@ -108,8 +98,7 @@ func (g *GitOperations) deploy(ctx context.Context, clone *url.URL, target SiteT
 	}
 	defer os.RemoveAll(tempDir) // Cleanup temp dir after deployment
 
-	// Clone into an otherwise empty directory, leaving the short-lived askpass
-	// helper outside the checkout so it cannot be deployed.
+	// Clone into an otherwise empty directory.
 	checkoutDir := filepath.Join(tempDir, "repository")
 	if err := runGitClone(ctx, g.gitCommand(), clone, checkoutDir, token); err != nil {
 		return fmt.Errorf("failed to clone: %w", err)

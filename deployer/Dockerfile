@@ -36,10 +36,13 @@ RUN addgroup -g ${PGID} -S pagesgroup && \
 
 # Copy binary from builder
 COPY --from=builder /build/deployer /usr/local/bin/deployer
+COPY git-askpass.sh /usr/local/lib/gitea-pages/git-askpass
 
 # Set binary permissions
 RUN chmod 755 /usr/local/bin/deployer && \
-    chown pagesuser:pagesgroup /usr/local/bin/deployer
+    chown pagesuser:pagesgroup /usr/local/bin/deployer && \
+    chmod 755 /usr/local/lib/gitea-pages/git-askpass && \
+    chown root:root /usr/local/lib/gitea-pages/git-askpass
 
 # Switch to non-privileged user
 USER pagesuser
