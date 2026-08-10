@@ -540,6 +540,40 @@ func (s *TokenStore) PutHook(ctx context.Context, credential HookCredential) err
 	return err
 }
 
+// RetireHookCredentials removes credentials belonging to a replaced Gitea
+// hook. Organization authorizers are first moved to the replacement key so
+// their authorization pool remains intact.
+func (s *TokenStore) RetireHookCredentials(ctx context.Context, principal HookPrincipal, hookID int64, activeKey string) error {
+	if s.db == nil {
+		return fmt.Errorf("hook credential storage is unavailable")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if principal.ScopeType == ScopeOrganization {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE organization_hook_authorizers SET hook_key = ? WHERE organization_name = ?
+		`, activeKey, principal.ScopeName); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM webhook_deliveries WHERE hook_key IN (
+			SELECT hook_key FROM hook_credentials WHERE gitea_hook_id = ? AND scope_type = ? AND scope_name = ? AND hook_key <> ?
+		)
+	`, hookID, principal.ScopeType, principal.ScopeName, activeKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM hook_credentials WHERE gitea_hook_id = ? AND scope_type = ? AND scope_name = ? AND hook_key <> ?
+	`, hookID, principal.ScopeType, principal.ScopeName, activeKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // PutOrganizationHookAuthorizer records every administrator who has approved
 // an organization hook. Subsequent approvals do not replace prior identities.
 func (s *TokenStore) PutOrganizationHookAuthorizer(ctx context.Context, organizationName, username, hookKey string) error {

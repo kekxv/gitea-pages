@@ -878,31 +878,9 @@ func (h *OAuthHandler) updateUserWebhook(token string, id int64, payload map[str
 
 func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal) error {
 	ctx := context.Background()
-	existing, err := h.findScopedHook(token, principal)
+	existingHooks, err := h.findScopedHooks(token, principal)
 	if err != nil {
 		return err
-	}
-	if existing != nil && strings.HasPrefix(existing.AuthorizationHeader, "Gitea-Pages ") {
-		encodedKey := strings.TrimPrefix(existing.AuthorizationHeader, "Gitea-Pages ")
-		key, err := base64.RawURLEncoding.DecodeString(encodedKey)
-		if err != nil || len(key) == 0 {
-			return fmt.Errorf("decode existing hook credential key")
-		}
-		stored, err := h.store.GetHook(ctx, string(key))
-		if err != nil {
-			return fmt.Errorf("load existing hook credential: %w", err)
-		}
-		if stored != nil && stored.ScopeType == principal.ScopeType && stored.ScopeName == principal.ScopeName {
-			if err := h.updateScopedHook(token, principal, existing.ID, h.hookPayload(*stored)); err != nil {
-				return fmt.Errorf("resynchronize existing hook credentials: %w", err)
-			}
-			if principal.ScopeType == ScopeOrganization {
-				if err := h.store.PutOrganizationHookAuthorizer(ctx, principal.ScopeName, principal.Username, stored.Key); err != nil {
-					return fmt.Errorf("save organization hook authorizer: %w", err)
-				}
-			}
-			return nil
-		}
 	}
 
 	credential, err := createHookCredential(principal)
@@ -910,20 +888,13 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 		return err
 	}
 	payload := h.hookPayload(credential)
-	created := existing == nil
-	var hookID int64
-	if created {
-		hookID, err = h.createScopedHook(token, principal, payload)
-	} else {
-		hookID = existing.ID
-		err = h.updateScopedHook(token, principal, existing.ID, payload)
-	}
+	hookID, err := h.createScopedHook(token, principal, payload)
 	if err != nil {
 		return err
 	}
 	credential.GiteaHookID = hookID
 	if err := h.store.PutHook(ctx, credential); err != nil {
-		rollbackErr := h.rollbackScopedHook(token, principal, existing, created, hookID)
+		rollbackErr := h.deleteScopedHook(token, principal, hookID)
 		if rollbackErr != nil {
 			return fmt.Errorf("save hook credential: %w (Gitea rollback: %v)", err, rollbackErr)
 		}
@@ -932,6 +903,14 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 	if principal.ScopeType == ScopeOrganization {
 		if err := h.store.PutOrganizationHookAuthorizer(ctx, principal.ScopeName, principal.Username, credential.Key); err != nil {
 			return fmt.Errorf("save organization hook authorizer: %w", err)
+		}
+	}
+	for _, existing := range existingHooks {
+		if err := h.deleteScopedHook(token, principal, existing.ID); err != nil {
+			return fmt.Errorf("delete replaced hook %d: %w", existing.ID, err)
+		}
+		if err := h.store.RetireHookCredentials(ctx, principal, existing.ID, credential.Key); err != nil {
+			return fmt.Errorf("retire replaced hook %d credentials: %w", existing.ID, err)
 		}
 	}
 	return nil
@@ -953,7 +932,7 @@ func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interfa
 	}
 }
 
-func (h *OAuthHandler) findScopedHook(token string, principal HookPrincipal) (*webhookInfo, error) {
+func (h *OAuthHandler) findScopedHooks(token string, principal HookPrincipal) ([]webhookInfo, error) {
 	endpoint := h.scopedHookURL(principal)
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -972,12 +951,13 @@ func (h *OAuthHandler) findScopedHook(token string, principal HookPrincipal) (*w
 	if err := json.NewDecoder(resp.Body).Decode(&hooks); err != nil {
 		return nil, err
 	}
+	matching := make([]webhookInfo, 0, len(hooks))
 	for i := range hooks {
 		if hooks[i].Config.URL == h.webhookURL {
-			return &hooks[i], nil
+			matching = append(matching, hooks[i])
 		}
 	}
-	return nil, nil
+	return matching, nil
 }
 
 func (h *OAuthHandler) scopedHookURL(principal HookPrincipal) string {
@@ -1036,21 +1016,7 @@ func (h *OAuthHandler) sendScopedHook(token string, principal HookPrincipal, met
 
 func (h *OAuthHandler) rollbackScopedHook(token string, principal HookPrincipal, previous *webhookInfo, created bool, id int64) error {
 	if created {
-		endpoint := h.scopedHookURL(principal) + "/" + strconv.FormatInt(id, 10)
-		req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := secretHTTPClient().Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= http.StatusBadRequest {
-			return giteaHookError(resp)
-		}
-		return nil
+		return h.deleteScopedHook(token, principal, id)
 	}
 	if previous == nil {
 		return nil
@@ -1065,6 +1031,24 @@ func (h *OAuthHandler) rollbackScopedHook(token string, principal HookPrincipal,
 		"authorization_header": previous.AuthorizationHeader,
 	}
 	return h.updateScopedHook(token, principal, previous.ID, payload)
+}
+
+func (h *OAuthHandler) deleteScopedHook(token string, principal HookPrincipal, id int64) error {
+	endpoint := h.scopedHookURL(principal) + "/" + strconv.FormatInt(id, 10)
+	req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := secretHTTPClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return giteaHookError(resp)
+	}
+	return nil
 }
 
 func giteaHookError(resp *http.Response) error {
