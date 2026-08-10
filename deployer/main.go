@@ -21,7 +21,7 @@ type Config struct {
 	PagesDir                string
 	DataDir                 string // Directory for persistent data (tokens.db, etc.)
 	GiteaAPIURL             string
-	GiteaPublicURL          string
+	GiteaPublicURL          string // Public browser and Git clone origin
 	OAuthClientID           string
 	OAuthClientSecret       string
 	OAuthRedirectURL        string
@@ -314,7 +314,11 @@ func main() {
 
 	// Webhooks are enabled only after encrypted token and per-hook credential
 	// storage exists. There is no runtime shared-secret fallback after migration.
-	repositoryVerifier, err := NewRepositoryVerifier(config.GiteaAPIURL, tokenStore)
+	giteaPublicURL := config.GiteaPublicURL
+	if giteaPublicURL == "" {
+		giteaPublicURL = config.GiteaAPIURL
+	}
+	repositoryVerifier, err := NewRepositoryVerifierWithPublicURL(config.GiteaAPIURL, giteaPublicURL, tokenStore)
 	if err != nil {
 		log.Fatalf("Failed to initialize repository verifier: %v", err)
 	}

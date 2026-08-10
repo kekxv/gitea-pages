@@ -76,7 +76,8 @@ uses `DOMAIN` as the complete Pages domain (for example,
 `pages.yourdomain.com`) for public callback and webhook URLs:
 ```bash
 PAGES_OAUTH_CLIENT_ID=your-client-id
-# Optional when it is the same as PAGES_GITEA_API_URL.
+# Optional when the browser and Git clone address is the same as
+# PAGES_GITEA_API_URL. Deployments always clone from this public address.
 PAGES_GITEA_PUBLIC_URL=https://gitea.example.com
 ```
 

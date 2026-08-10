@@ -63,10 +63,19 @@ type RepositoryVerifier interface {
 // authorized the same organization hook scope.
 type GiteaRepositoryVerifier struct {
 	apiBase    *url.URL
+	cloneBase  *url.URL
 	tokenStore *TokenStore
 }
 
 func NewRepositoryVerifier(apiURL string, tokenStore *TokenStore) (*GiteaRepositoryVerifier, error) {
+	return NewRepositoryVerifierWithPublicURL(apiURL, apiURL, tokenStore)
+}
+
+// NewRepositoryVerifierWithPublicURL separates the authenticated Gitea API
+// endpoint from the public HTTPS origin used for Git clones. This supports an
+// API behind an internal route without allowing API response fields to choose
+// the clone destination.
+func NewRepositoryVerifierWithPublicURL(apiURL, publicURL string, tokenStore *TokenStore) (*GiteaRepositoryVerifier, error) {
 	apiBase, err := parseHTTPURL(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse Gitea API URL: %w", err)
@@ -74,14 +83,21 @@ func NewRepositoryVerifier(apiURL string, tokenStore *TokenStore) (*GiteaReposit
 	if apiBase.User != nil {
 		return nil, errors.New("Gitea API URL must not include credentials")
 	}
+	cloneBase, err := parseHTTPURL(publicURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse Gitea public URL: %w", err)
+	}
+	if cloneBase.User != nil {
+		return nil, errors.New("Gitea public URL must not include credentials")
+	}
 	if tokenStore == nil {
 		return nil, errors.New("token store is required")
 	}
-	return &GiteaRepositoryVerifier{apiBase: apiBase, tokenStore: tokenStore}, nil
+	return &GiteaRepositoryVerifier{apiBase: apiBase, cloneBase: cloneBase, tokenStore: tokenStore}, nil
 }
 
 func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrincipal, payload PayloadRepository) (*VerifiedRepository, error) {
-	if v == nil || v.tokenStore == nil || v.apiBase == nil {
+	if v == nil || v.tokenStore == nil || v.apiBase == nil || v.cloneBase == nil {
 		return nil, ErrRepositoryAccess
 	}
 	if principal.Username == "" {
@@ -115,7 +131,7 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 	if repo.Owner.Username != principal.ScopeName {
 		return nil, ErrRepositoryOutOfScope
 	}
-	cloneURL, err := ValidateCanonicalCloneURL(repo.CloneURL, v.apiBase)
+	cloneURL, err := CanonicalCloneURL(v.cloneBase, repo.Owner.Username, repo.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +145,25 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 		SizeBytes:   repo.Size * 1024,
 		AccessToken: token,
 	}, nil
+}
+
+// CanonicalCloneURL constructs the only clone endpoint deployment may use
+// after Gitea has authenticated and verified the repository identity. It does
+// not trust presentation fields such as clone_url from either webhook or API
+// payloads to select a network target.
+func CanonicalCloneURL(apiBase *url.URL, owner, name string) (*url.URL, error) {
+	if apiBase == nil || apiBase.User != nil || owner == "" || name == "" {
+		return nil, ErrCloneURLInvalid
+	}
+	cloneURL := *apiBase
+	cloneURL.User = nil
+	cloneURL.RawQuery = ""
+	cloneURL.ForceQuery = false
+	cloneURL.Fragment = ""
+	cloneURL.RawFragment = ""
+	cloneURL.RawPath = ""
+	cloneURL.Path = strings.TrimRight(apiBase.Path, "/") + "/" + owner + "/" + name + ".git"
+	return ValidateCanonicalCloneURL(cloneURL.String(), apiBase)
 }
 
 // tokenForPrincipal allows organization hooks to survive an unavailable

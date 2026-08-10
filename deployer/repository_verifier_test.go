@@ -85,6 +85,33 @@ func TestVerifyRepositoryUsesPrincipalTokenAndCanonicalMetadata(t *testing.T) {
 	}
 }
 
+// This test fails if a clone URL returned by the repository API can override
+// the configured Gitea origin after the repository identity is verified.
+func TestVerifyRepositoryDerivesCloneURLFromConfiguredGiteaOrigin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		repo := RepoInfo{ID: 7, Name: "site", FullName: "platform/site", CloneURL: "ssh://git@git.kekxv.com/platform/site.git"}
+		repo.Owner.Username = "platform"
+		_ = json.NewEncoder(w).Encode(repo)
+	}))
+	defer server.Close()
+
+	store := newTestTokenStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	store.Set("maintainer", &UserToken{AccessToken: "principal-token"})
+	verifier, err := NewRepositoryVerifierWithPublicURL(server.URL, "https://gitea.example.com/gitea", store)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+
+	verified, err := verifier.Verify(context.Background(), HookPrincipal{Username: "maintainer", ScopeType: ScopeOrganization, ScopeName: "platform"}, PayloadRepository{ID: 7, Name: "site", OwnerUsername: "platform"})
+	if err != nil {
+		t.Fatalf("verify repository: %v", err)
+	}
+	if got, want := verified.CloneURL.String(), "https://gitea.example.com/gitea/platform/site.git"; got != want {
+		t.Fatalf("clone URL = %q, want configured Gitea origin %q", got, want)
+	}
+}
+
 // This test fails if an authenticated organization hook cannot continue with
 // another administrator that previously authorized that same hook scope.
 func TestVerifyOrganizationHookUsesValidAuthorizedAdministratorWhenPrincipalTokenUnavailable(t *testing.T) {

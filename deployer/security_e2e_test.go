@@ -98,7 +98,8 @@ func newSecurityE2EFixture(t *testing.T) *securityE2EFixture {
 			t.Fatal(err)
 		}
 	}
-	verifier, err := NewRepositoryVerifier(giteaServer.URL, store)
+	cloneOriginURL := "https://" + strings.TrimPrefix(giteaServer.URL, "http://")
+	verifier, err := NewRepositoryVerifierWithPublicURL(giteaServer.URL, cloneOriginURL, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +121,7 @@ func newSecurityE2EFixture(t *testing.T) *securityE2EFixture {
 	return &securityE2EFixture{
 		t: t, pages: pages, store: store, gitea: gitea, giteaServer: giteaServer,
 		webhookServer: webhookServer, service: service, gitMarker: marker,
-		cloneOriginURL: "https://" + strings.TrimPrefix(giteaServer.URL, "http://"),
+		cloneOriginURL: cloneOriginURL,
 	}
 }
 
@@ -362,9 +363,10 @@ func TestSecurityE2EDestructivePathsLeaveEveryTenantUntouched(t *testing.T) {
 	}
 }
 
-// This would fail if the verifier accepted a clone transport that can escape
-// the configured Gitea origin before the deployment process starts.
-func TestSecurityE2ERejectsUnsafeCloneTransportsBeforeGit(t *testing.T) {
+// This would fail if a clone URL from the repository API could select the Git
+// destination. Unsafe API response values must be ignored in favor of the
+// configured public Gitea origin after repository identity verification.
+func TestSecurityE2EIgnoresUnsafeRepositoryAPICloneURLs(t *testing.T) {
 	unsafe := []struct {
 		name string
 		url  func(*securityE2EFixture) string
@@ -387,11 +389,11 @@ func TestSecurityE2ERejectsUnsafeCloneTransportsBeforeGit(t *testing.T) {
 			f := newSecurityE2EFixture(t)
 			f.setCanonicalRepo(securityE2ECanonicalRepository(7, "alice", "site", tc.url(f), true))
 			response := f.deliver("push", "alice-hook", "alice-secret", "transport-"+tc.name, securityE2EWebhookBody("push", "alice", "site", 7, ""))
-			if got, want := responseStatus(t, response), http.StatusForbidden; got != want {
+			if got, want := responseStatus(t, response), http.StatusOK; got != want {
 				t.Fatalf("status = %d, want %d", got, want)
 			}
-			if got := securityE2EGitInvocations(t, f.gitMarker); len(got) != 0 {
-				t.Fatalf("Git ran for unsafe clone transport: %v", got)
+			if got := securityE2EGitInvocations(t, f.gitMarker); strings.Join(got, ",") != "clone" {
+				t.Fatalf("Git invocations = %v, want clone using configured origin", got)
 			}
 		})
 	}
