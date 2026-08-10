@@ -19,9 +19,10 @@ services:
       args:
         PUID: ${PAGES_UID:-1000}
         PGID: ${PAGES_GID:-1000}
-        PAGES_DOMAIN: ${PAGES_DOMAIN:?PAGES_DOMAIN must be set to the complete Pages domain}
     ports:
       - "${PAGES_HTTP_PORT:-80}:8080"
+    environment:
+      PAGES_DOMAIN: ${PAGES_DOMAIN:?PAGES_DOMAIN must be set to the complete Pages domain}
     volumes:
       - type: bind
         source: ${PAGES_DATA_DIR:-./pages/webroot}

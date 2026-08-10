@@ -32,38 +32,39 @@ printf 'Alice root site\n' > "$pages_dir/alice/_root/index.html"
 printf 'Alice project site\n' > "$pages_dir/alice/project/index.html"
 
 grep -Eq '^FROM nginx:1\.29-alpine@sha256:[0-9a-f]{64}$' nginx/Dockerfile
-# Generic CI/buildx image builds do not necessarily provide Compose's required
-# DOMAIN build argument. They must still produce a safe image whose baked
-# domain cannot accidentally route a real deployment.
+# A generic release image must accept its Pages domain at container startup,
+# not bind every consumer to the domain present when the image was built.
 docker build -t "${image}-default-domain" ./nginx
-# nginx -T resolves the private deployer upstream even though this build-only
-# check does not start Compose. Supply a loopback mapping so it is independent
-# of the CI runner's Docker DNS configuration.
-default_nginx="$(docker run --rm --network none --add-host deployer:127.0.0.1 "${image}-default-domain" nginx -T 2>&1)"
+default_nginx="$(docker run --rm --network none --add-host deployer:127.0.0.1 \
+    -e PAGES_DOMAIN=pages.invalid "${image}-default-domain" \
+    /usr/local/bin/start-nginx.sh -T 2>&1)"
 grep -Fq 'pages.invalid' <<<"$default_nginx"
 # DOMAIN is the complete Pages domain.  Existing installations use values such
 # as pages.example.com, which must continue to route alice.pages.example.com.
-docker build --build-arg PAGES_DOMAIN=pages.example.com -t "$image" ./nginx
+docker build -t "$image" ./nginx
 
 docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
     --add-host deployer:127.0.0.1 \
+    -e PAGES_DOMAIN=pages.example.com \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     --tmpfs /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
-    "$image" nginx -t
+    "$image" /usr/local/bin/start-nginx.sh -t
 
 rendered_nginx="$(docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
     --add-host deployer:127.0.0.1 \
+    -e PAGES_DOMAIN=pages.example.com \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     --tmpfs /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
-    "$image" nginx -T 2>&1)"
+    "$image" /usr/local/bin/start-nginx.sh -T 2>&1)"
 grep -Fq 'client_max_body_size 1m;' <<<"$rendered_nginx"
 grep -Fq 'limit_req zone=webhook' <<<"$rendered_nginx"
 
 docker run -d --name "$container" --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
     --add-host deployer:host-gateway \
+    -e PAGES_DOMAIN=pages.example.com \
     -p "127.0.0.1:${host_port}:8080" \
     -v "$pages_dir:/var/www/pages:ro" \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
