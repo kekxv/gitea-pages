@@ -7,6 +7,12 @@ cd "$repo_root"
 workflow=.github/workflows/security.yml
 security_doc=docs/security.md
 
+workflow_count=$(find .github/workflows -maxdepth 1 -type f -name '*.yml' | wc -l | tr -d ' ')
+if test "$workflow_count" -ne 1 || test ! -f "$workflow"; then
+    printf 'the repository must expose exactly one CI workflow: %s\n' "$workflow" >&2
+    exit 1
+fi
+
 require_file() {
     test -f "$1" || { printf 'missing required file: %s\n' "$1" >&2; exit 1; }
 }
@@ -43,8 +49,16 @@ require_text "$workflow" 'docker compose --env-file .env.example config --quiet'
 require_text "$workflow" 'bash tests/compose_security_test.sh'
 require_text "$workflow" 'bash tests/nginx_test.sh'
 require_text "$workflow" 'trivy config --exit-code 1 --severity HIGH,CRITICAL .'
-require_text "$workflow" 'trivy image --exit-code 1 --severity CRITICAL gitea-pages-deployer:${GITHUB_SHA}'
-require_text "$workflow" 'trivy image --exit-code 1 --severity CRITICAL gitea-pages-nginx:${GITHUB_SHA}'
+require_text "$workflow" 'DEPLOYER_IMAGE: gitea-pages-deployer'
+require_text "$workflow" 'NGINX_IMAGE: gitea-pages-nginx'
+require_text "$workflow" 'trivy image --exit-code 1 --severity CRITICAL ${DEPLOYER_IMAGE}:${GITHUB_SHA}'
+require_text "$workflow" 'trivy image --exit-code 1 --severity CRITICAL ${NGINX_IMAGE}:${GITHUB_SHA}'
+require_text "$workflow" 'docker buildx build --platform linux/amd64,linux/arm64 --push'
+require_text "$workflow" 'github.event_name == '"'"'push'"'"''
+if grep -Eq 'codecov/|metadata-action|build-push-action|setup-qemu-action|setup-buildx-action|login-action' "$workflow"; then
+    printf 'workflow retains redundant third-party build, metadata, or coverage actions\n' >&2
+    exit 1
+fi
 if grep -Fq 'cd tests' "$workflow"; then
     printf 'workflow invokes the historical non-module tests directory\n' >&2
     exit 1

@@ -1,25 +1,30 @@
-name: Security release gate
+name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  packages: write
 
 env:
   GO_VERSION: "1.26.5"
   GOVULNCHECK_VERSION: "v1.6.0"
   TRIVY_VERSION: "0.73.0"
+  REGISTRY: ghcr.io
+  DEPLOYER_IMAGE: gitea-pages-deployer
+  NGINX_IMAGE: gitea-pages-nginx
 
 jobs:
-  security:
-    name: Security release gate
+  verify-and-publish:
+    name: Verify and publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out source
@@ -35,27 +40,24 @@ jobs:
         working-directory: deployer
         run: go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
 
-      - name: Run Go race tests with coverage
+      - name: Run Go verification
         working-directory: deployer
-        run: go test -race -coverprofile=coverage.out ./...
+        run: |
+          go vet ./...
+          go test -race -coverprofile=coverage.out ./...
+          govulncheck ./...
 
-      - name: Check Go dependencies for vulnerabilities
-        working-directory: deployer
-        run: govulncheck ./...
-
-      - name: Validate the production Compose topology
-        run: docker compose --env-file .env.example config --quiet
-
-      - name: Validate Compose containment policy
-        run: bash tests/compose_security_test.sh
-
-      - name: Validate Nginx runtime policy
-        run: bash tests/nginx_test.sh
+      - name: Validate configuration and documentation gates
+        run: |
+          docker compose --env-file .env.example config --quiet
+          bash tests/security_release_gate_test.sh
+          bash tests/compose_security_test.sh
+          bash tests/nginx_test.sh
 
       - name: Build release candidates for image scanning
         run: |
-          docker build --tag gitea-pages-deployer:${GITHUB_SHA} ./deployer
-          docker build --build-arg PAGES_DOMAIN=example.com --tag gitea-pages-nginx:${GITHUB_SHA} ./nginx
+          docker build --tag ${DEPLOYER_IMAGE}:${GITHUB_SHA} ./deployer
+          docker build --build-arg PAGES_DOMAIN=example.com --tag ${NGINX_IMAGE}:${GITHUB_SHA} ./nginx
 
       - name: Install Trivy
         run: |
@@ -66,8 +68,29 @@ jobs:
       - name: Scan configuration and release images
         run: |
           trivy config --exit-code 1 --severity HIGH,CRITICAL .
-          trivy image --exit-code 1 --severity CRITICAL gitea-pages-deployer:${GITHUB_SHA}
-          trivy image --exit-code 1 --severity CRITICAL gitea-pages-nginx:${GITHUB_SHA}
+          trivy image --exit-code 1 --severity CRITICAL ${DEPLOYER_IMAGE}:${GITHUB_SHA}
+          trivy image --exit-code 1 --severity CRITICAL ${NGINX_IMAGE}:${GITHUB_SHA}
 
-      - name: Validate release documentation and workflow contracts
-        run: bash tests/security_release_gate_test.sh
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
+
+      - name: Publish multi-architecture images
+        if: github.event_name == 'push'
+        env:
+          IMAGE_PREFIX: ${{ env.REGISTRY }}/${{ github.repository }}
+        run: |
+          docker buildx create --name gitea-pages --use || docker buildx use gitea-pages
+          deployer_tags="-t ${IMAGE_PREFIX}/deployer:${GITHUB_SHA}"
+          nginx_tags="-t ${IMAGE_PREFIX}/nginx:${GITHUB_SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            deployer_tags="$deployer_tags -t ${IMAGE_PREFIX}/deployer:latest"
+            nginx_tags="$nginx_tags -t ${IMAGE_PREFIX}/nginx:latest"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            deployer_tags="$deployer_tags -t ${IMAGE_PREFIX}/deployer:${GITHUB_REF_NAME}"
+            nginx_tags="$nginx_tags -t ${IMAGE_PREFIX}/nginx:${GITHUB_REF_NAME}"
+          fi
+          docker buildx build --platform linux/amd64,linux/arm64 --push $deployer_tags ./deployer
+          docker buildx build --platform linux/amd64,linux/arm64 --build-arg PAGES_DOMAIN=example.com --push $nginx_tags ./nginx
