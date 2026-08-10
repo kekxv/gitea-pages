@@ -23,7 +23,10 @@ services:
     ports:
       - "${PAGES_HTTP_PORT:-80}:8080"
     volumes:
-      - pages_data:/var/www/pages:ro
+      - type: bind
+        source: ${PAGES_DATA_DIR:-./pages/webroot}
+        target: /var/www/pages
+        read_only: true
     cpus: "0.50"
     mem_limit: 128M
     tmpfs:
@@ -47,24 +50,17 @@ services:
     expose:
       - "8080"
     volumes:
-      - pages_data:/var/www/pages:rw
+      - type: bind
+        source: ${PAGES_DATA_DIR:-./pages/webroot}
+        target: /var/www/pages
       - deployer_data:/var/lib/deployer:rw
     secrets:
       - source: session_secret
         target: gitea_pages_session_secret
-        uid: "${PAGES_UID:-1000}"
-        gid: "${PAGES_GID:-1000}"
-        mode: 0400
       - source: token_encryption_key
         target: gitea_pages_token_encryption_key
-        uid: "${PAGES_UID:-1000}"
-        gid: "${PAGES_GID:-1000}"
-        mode: 0400
       - source: oauth_client_secret
         target: gitea_pages_oauth_client_secret
-        uid: "${PAGES_UID:-1000}"
-        gid: "${PAGES_GID:-1000}"
-        mode: 0400
     environment:
       DOMAIN: ${PAGES_DOMAIN:?PAGES_DOMAIN must be set to the complete Pages domain}
       APP_ENV: ${PAGES_APP_ENV:-production}
@@ -94,12 +90,6 @@ services:
       - deployer_egress
 
 volumes:
-  pages_data:
-    name: gitea-pages-data
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PAGES_DATA_DIR:-/data/gitea-pages}
   deployer_data:
     name: gitea-pages-deployer-data
 

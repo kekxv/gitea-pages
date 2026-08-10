@@ -32,7 +32,16 @@ audit_config="$audit_dir/compose.json"
   docker compose --env-file "$audit_env" config --format json > "$audit_config"
 )
 
-AUDIT_CONFIG="$audit_config" python3 - <<'PY'
+relative_env="$audit_dir/relative.env"
+cp "$audit_env" "$relative_env"
+sed -i "s|^PAGES_DATA_DIR=.*|PAGES_DATA_DIR=./tests|" "$relative_env"
+relative_config="$audit_dir/relative-compose.json"
+(
+  cd "$repo_root"
+  docker compose --env-file "$relative_env" config --format json > "$relative_config"
+)
+
+AUDIT_CONFIG="$audit_config" RELATIVE_CONFIG="$relative_config" REPO_ROOT="$repo_root" python3 - <<'PY'
 import json
 import os
 
@@ -42,6 +51,8 @@ with open(os.environ["AUDIT_CONFIG"], encoding="utf-8") as audit_file:
 services = config["services"]
 nginx = services["nginx"]
 deployer = services["deployer"]
+with open(os.environ["RELATIVE_CONFIG"], encoding="utf-8") as relative_file:
+    relative_config = json.load(relative_file)
 
 def require(condition, message):
     if not condition:
@@ -80,8 +91,16 @@ for target in (
 ):
     secret = secrets.get(target)
     require(secret is not None, f"deployer must mount {target} as a Compose secret")
-    require(secret.get("uid") == runtime_uid and secret.get("gid") == runtime_gid, f"{target} must be owned by the runtime user")
-    require(secret.get("mode") == "0400", f"{target} must be read-only to the runtime user")
+    require(not {"uid", "gid", "mode"}.intersection(secret), f"{target} must not use unsupported file-secret ownership fields")
+
+relative_mounts = [
+    mount for mount in relative_config["services"]["nginx"].get("volumes", [])
+    if mount.get("target") == "/var/www/pages"
+]
+require(len(relative_mounts) == 1, "nginx must mount one Pages data directory")
+relative_mount = relative_mounts[0]
+require(relative_mount.get("type") == "bind", "Pages data must use a direct bind mount")
+require(relative_mount.get("source") == os.path.join(os.environ["REPO_ROOT"], "tests"), "relative PAGES_DATA_DIR must resolve from the Compose file directory")
 
 require("WEBHOOK_SECRET" not in deployer.get("environment", {}), "deployer must not receive a webhook secret environment value")
 require("GITEA_SSH_KEY_PATH" not in deployer.get("environment", {}), "deployer must not receive an SSH key path")
