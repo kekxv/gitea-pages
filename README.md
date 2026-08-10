@@ -72,10 +72,12 @@ Users can self-authorize to enable automatic webhook registration and private re
 
 Set the client ID in `.env`; keep the client secret in the
 `OAUTH_CLIENT_SECRET_HOST_FILE` file described by `.env.example`. Compose
-constructs public callback and webhook URLs from `DOMAIN`:
+uses `DOMAIN` as the complete Pages domain (for example,
+`pages.yourdomain.com`) for public callback and webhook URLs:
 ```bash
-OAUTH_CLIENT_ID=your-client-id
-GITEA_PUBLIC_URL=https://gitea.example.com
+PAGES_OAUTH_CLIENT_ID=your-client-id
+# Optional when it is the same as PAGES_GITEA_API_URL.
+PAGES_GITEA_PUBLIC_URL=https://gitea.example.com
 ```
 
 #### Step 3: User Authorization
@@ -184,7 +186,7 @@ Site available at: `https://username.pages.example.com/my-site`
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         Gitea Server                         │
-│    signed, per-hook delivery → pages.<DOMAIN>/webhook        │
+│    signed, per-hook delivery → <DOMAIN>/webhook              │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -318,11 +320,12 @@ docker compose up -d --build
 #### 步骤 2：配置 Deployer
 
 在 `.env` 中设置客户端 ID；客户端密钥必须保存在 `.env.example` 所述的
-`OAUTH_CLIENT_SECRET_HOST_FILE` 文件中。Compose 会根据 `DOMAIN` 构造公开回调
-和 webhook 地址：
+`OAUTH_CLIENT_SECRET_HOST_FILE` 文件中。`DOMAIN` 是完整的 Pages 域名（例如
+`pages.yourdomain.com`），Compose 据此使用公开回调和 webhook 地址：
 ```bash
-OAUTH_CLIENT_ID=你的客户端ID
-GITEA_PUBLIC_URL=https://gitea.example.com
+PAGES_OAUTH_CLIENT_ID=你的客户端ID
+# 与 PAGES_GITEA_API_URL 相同时可省略。
+PAGES_GITEA_PUBLIC_URL=https://gitea.example.com
 ```
 
 #### 步骤 3：用户授权
@@ -383,7 +386,7 @@ git push -u origin gh-pages
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         Gitea Server                         │
-│    每个 hook 的签名投递 → pages.<DOMAIN>/webhook             │
+│    每个 hook 的签名投递 → <DOMAIN>/webhook                   │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼

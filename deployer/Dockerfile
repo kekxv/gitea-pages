@@ -46,7 +46,7 @@ USER pagesuser
 
 # Environment defaults
 ENV WEBHOOK_PORT=8080 \
-    DOMAIN=yourdomain.com \
+    DOMAIN=pages.yourdomain.com \
     PAGES_DATA_DIR=/var/www/pages \
     DEPLOYER_DATA_DIR=/var/lib/deployer \
     MAX_SITE_SIZE_MB=100

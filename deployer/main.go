@@ -120,7 +120,7 @@ func LoadConfig() (*Config, error) {
 	enableHTTPS := os.Getenv("ENABLE_HTTPS") == "true"
 
 	return &Config{
-		Domain:                  getEnvOrDefault("DOMAIN", "yourdomain.com"),
+		Domain:                  getEnvOrDefault("DOMAIN", "pages.yourdomain.com"),
 		WebhookPort:             port,
 		PagesDir:                getEnvOrDefault("PAGES_DATA_DIR", "/var/www/pages"),
 		DataDir:                 getEnvOrDefault("DEPLOYER_DATA_DIR", "/var/lib/deployer"),

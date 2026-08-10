@@ -41,7 +41,9 @@ docker build -t "${image}-default-domain" ./nginx
 # of the CI runner's Docker DNS configuration.
 default_nginx="$(docker run --rm --network none --add-host deployer:127.0.0.1 "${image}-default-domain" nginx -T 2>&1)"
 grep -Fq 'pages.invalid' <<<"$default_nginx"
-docker build --build-arg PAGES_DOMAIN=example.com -t "$image" ./nginx
+# DOMAIN is the complete Pages domain.  Existing installations use values such
+# as pages.example.com, which must continue to route alice.pages.example.com.
+docker build --build-arg PAGES_DOMAIN=pages.example.com -t "$image" ./nginx
 
 docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
@@ -151,17 +153,17 @@ printf '%032d\n' 0 > "$secret_dir/session"
 printf '%032d\n' 0 > "$secret_dir/token-key"
 printf 'oauth-client-secret\n' > "$secret_dir/oauth-client-secret"
 
-deployer_compose="$(DOMAIN=example.com GITEA_API_URL=https://gitea.example.com \
-    GITEA_PUBLIC_URL=https://gitea.example.com OAUTH_CLIENT_ID=pages-client \
-    SESSION_SECRET_HOST_FILE="$secret_dir/session" \
-    TOKEN_ENCRYPTION_KEY_HOST_FILE="$secret_dir/token-key" \
-    OAUTH_CLIENT_SECRET_HOST_FILE="$secret_dir/oauth-client-secret" \
+deployer_compose="$(PAGES_DOMAIN=pages.example.com PAGES_GITEA_API_URL=https://gitea.example.com \
+    PAGES_GITEA_PUBLIC_URL=https://gitea.example.com PAGES_OAUTH_CLIENT_ID=pages-client \
+    PAGES_SESSION_SECRET_HOST_FILE="$secret_dir/session" \
+    PAGES_TOKEN_ENCRYPTION_KEY_HOST_FILE="$secret_dir/token-key" \
+    PAGES_OAUTH_CLIENT_SECRET_HOST_FILE="$secret_dir/oauth-client-secret" \
     docker compose config deployer)"
-nginx_compose="$(DOMAIN=example.com GITEA_API_URL=https://gitea.example.com \
-    GITEA_PUBLIC_URL=https://gitea.example.com OAUTH_CLIENT_ID=pages-client \
-    SESSION_SECRET_HOST_FILE="$secret_dir/session" \
-    TOKEN_ENCRYPTION_KEY_HOST_FILE="$secret_dir/token-key" \
-    OAUTH_CLIENT_SECRET_HOST_FILE="$secret_dir/oauth-client-secret" \
+nginx_compose="$(PAGES_DOMAIN=pages.example.com PAGES_GITEA_API_URL=https://gitea.example.com \
+    PAGES_GITEA_PUBLIC_URL=https://gitea.example.com PAGES_OAUTH_CLIENT_ID=pages-client \
+    PAGES_SESSION_SECRET_HOST_FILE="$secret_dir/session" \
+    PAGES_TOKEN_ENCRYPTION_KEY_HOST_FILE="$secret_dir/token-key" \
+    PAGES_OAUTH_CLIENT_SECRET_HOST_FILE="$secret_dir/oauth-client-secret" \
     docker compose config nginx)"
 
 ! grep -Eq '^    ports:' <<<"$deployer_compose"
@@ -171,6 +173,15 @@ grep -Fq 'pids_limit:' <<<"$deployer_compose"
 grep -Fq 'SESSION_SECRET_FILE: /run/secrets/gitea_pages_session_secret' <<<"$deployer_compose"
 grep -Fq 'source: session_secret' <<<"$deployer_compose"
 ! grep -Fq '/dev/null' <<<"$deployer_compose"
+grep -Fq 'OAUTH_REDIRECT_URL: https://pages.example.com/oauth/callback' <<<"$deployer_compose"
+grep -Fq 'WEBHOOK_PUBLIC_URL: https://pages.example.com/webhook' <<<"$deployer_compose"
+deployer_compose_default_public_url="$(PAGES_DOMAIN=pages.example.com PAGES_GITEA_API_URL=https://gitea.example.com \
+    PAGES_OAUTH_CLIENT_ID=pages-client \
+    PAGES_SESSION_SECRET_HOST_FILE="$secret_dir/session" \
+    PAGES_TOKEN_ENCRYPTION_KEY_HOST_FILE="$secret_dir/token-key" \
+    PAGES_OAUTH_CLIENT_SECRET_HOST_FILE="$secret_dir/oauth-client-secret" \
+    docker compose config deployer)"
+grep -Fq 'GITEA_PUBLIC_URL: https://gitea.example.com' <<<"$deployer_compose_default_public_url"
 grep -Fq 'published: "80"' <<<"$nginx_compose"
 grep -Fq 'target: 8080' <<<"$nginx_compose"
 grep -Fq 'read_only: true' <<<"$nginx_compose"

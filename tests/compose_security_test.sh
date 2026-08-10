@@ -5,6 +5,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 audit_dir=$(mktemp -d)
 trap 'rm -rf "$audit_dir"' EXIT
 
+# There is one authoritative Compose configuration. Keeping a second copied
+# example causes security defaults to drift between the two files.
+test ! -e "$repo_root/docker-compose.example.yml"
+
 printf '%s\n' 'session-secret-material-at-least-thirty-two-bytes' > "$audit_dir/session_secret"
 printf '%032d' 0 | tr '0' 'k' > "$audit_dir/token_encryption_key"
 printf '%s\n' 'oauth-client-secret-material' > "$audit_dir/oauth_client_secret"
@@ -13,13 +17,13 @@ mkdir -p "$audit_dir/pages"
 audit_env="$audit_dir/.env"
 cp "$repo_root/.env.example" "$audit_env"
 cat >> "$audit_env" <<EOF
-SESSION_SECRET_HOST_FILE=$audit_dir/session_secret
-TOKEN_ENCRYPTION_KEY_HOST_FILE=$audit_dir/token_encryption_key
-OAUTH_CLIENT_SECRET_HOST_FILE=$audit_dir/oauth_client_secret
+PAGES_SESSION_SECRET_HOST_FILE=$audit_dir/session_secret
+PAGES_TOKEN_ENCRYPTION_KEY_HOST_FILE=$audit_dir/token_encryption_key
+PAGES_OAUTH_CLIENT_SECRET_HOST_FILE=$audit_dir/oauth_client_secret
 PAGES_DATA_DIR=$audit_dir/pages
-HTTP_PORT=18080
-PUID=1234
-PGID=5678
+PAGES_HTTP_PORT=18080
+PAGES_UID=1234
+PAGES_GID=5678
 EOF
 
 audit_config="$audit_dir/compose.json"

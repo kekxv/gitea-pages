@@ -6,7 +6,7 @@ supersedes the early prototype design.
 ## Deployment topology
 
 - Nginx is the only service with a published host port. It terminates the
-  public Pages and `pages.<DOMAIN>` routes.
+  public Pages control route `<DOMAIN>` and user subdomains under it.
 - Deployer has no published host port. Nginx forwards its OAuth and webhook
   routes to Deployer on the internal `pages_backend` network.
 - Deployer can reach Gitea through its dedicated egress network, but has no
