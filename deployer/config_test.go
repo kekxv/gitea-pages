@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ func TestLoadConfigRejectsMissingTokenEncryptionKey(t *testing.T) {
 func TestLoadConfigDoesNotUseLegacyWebhookSecretsAtRuntime(t *testing.T) {
 	dir := t.TempDir()
 	sessionSecret := writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)+"\n")
-	encryptionKey := writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32)+"\n")
+	encryptionKey := writeTestSecretFile(t, dir, "key", strings.Repeat("k", 32))
 	legacyWebhookSecret := writeTestSecretFile(t, dir, "legacy-webhook", "file-webhook-secret\n")
 
 	t.Setenv("APP_ENV", "production")
@@ -79,6 +80,28 @@ func TestLoadConfigDoesNotUseLegacyWebhookSecretsAtRuntime(t *testing.T) {
 	}
 	if got, want := string(config.TokenEncryptionKey), strings.Repeat("k", 32); got != want {
 		t.Errorf("TokenEncryptionKey = %q, want %q", got, want)
+	}
+}
+
+func TestLoadConfigPreservesRawTokenEncryptionKeyWhitespaceBytes(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("\n" + strings.Repeat("k", 30) + "\t")
+
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("GITEA_API_URL", "https://gitea.example.com")
+	t.Setenv("SESSION_SECRET_FILE", writeTestSecretFile(t, dir, "session", strings.Repeat("s", 32)))
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TOKEN_ENCRYPTION_KEY_FILE", keyPath)
+
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v, want a 32-byte raw key to be accepted", err)
+	}
+	if !bytes.Equal(config.TokenEncryptionKey, key) {
+		t.Fatalf("TokenEncryptionKey = %x, want raw key %x", config.TokenEncryptionKey, key)
 	}
 }
 

@@ -102,7 +102,7 @@ func LoadConfig() (*Config, error) {
 		return nil, errors.New("SESSION_SECRET_FILE or SESSION_SECRET must contain at least 32 bytes")
 	}
 
-	tokenEncryptionKey, err := loadOptionalSecretFile(os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"), "")
+	tokenEncryptionKey, err := loadRawSecretFile(os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"))
 	if err != nil {
 		return nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY_FILE: %w", err)
 	}
@@ -159,6 +159,23 @@ func loadOptionalSecretFile(path, legacyValue string) ([]byte, error) {
 		return []byte(legacyValue), nil
 	}
 	return readSecretFile(path)
+}
+
+// loadRawSecretFile is for binary credentials. In particular, an AES key may
+// legitimately start or end with a byte that Unicode whitespace trimming would
+// discard, so it must never pass through readSecretFile.
+func loadRawSecretFile(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read secret file: %w", err)
+	}
+	if len(b) == 0 {
+		return nil, errors.New("secret file is empty")
+	}
+	return b, nil
 }
 
 func loadOAuthClientSecret(clientID, path, legacyValue string) (string, error) {

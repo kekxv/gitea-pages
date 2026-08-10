@@ -944,7 +944,7 @@ func migrationCLISecrets() ([]byte, []byte, error) {
 	if keyPath == "" {
 		return nil, nil, errors.New("TOKEN_ENCRYPTION_KEY_FILE is required for security migration")
 	}
-	key, err := readSecretFile(keyPath)
+	key, err := loadRawSecretFile(keyPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY_FILE: %w", err)
 	}
