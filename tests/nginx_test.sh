@@ -39,18 +39,20 @@ docker build -t "${image}-default-domain" ./nginx
 # nginx -T resolves the private deployer upstream even though this build-only
 # check does not start Compose. Supply a loopback mapping so it is independent
 # of the CI runner's Docker DNS configuration.
-default_nginx="$(docker run --rm --add-host deployer:127.0.0.1 "${image}-default-domain" nginx -T 2>&1)"
+default_nginx="$(docker run --rm --network none --add-host deployer:127.0.0.1 "${image}-default-domain" nginx -T 2>&1)"
 grep -Fq 'pages.invalid' <<<"$default_nginx"
 docker build --build-arg PAGES_DOMAIN=example.com -t "$image" ./nginx
 
-docker run --rm --read-only --user 1000:1000 --cap-drop ALL \
+docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
+    --add-host deployer:127.0.0.1 \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     --tmpfs /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     "$image" nginx -t
 
-rendered_nginx="$(docker run --rm --read-only --user 1000:1000 --cap-drop ALL \
+rendered_nginx="$(docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL \
     --security-opt no-new-privileges:true \
+    --add-host deployer:127.0.0.1 \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     --tmpfs /var/cache/nginx:rw,nosuid,nodev,noexec,uid=1000,gid=1000,mode=700 \
     "$image" nginx -T 2>&1)"
