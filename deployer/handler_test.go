@@ -176,6 +176,34 @@ func TestHandleWebhookRejectsCrossTenantPrivateRepositoryBeforeDeployment(t *tes
 	}
 }
 
+func TestHandleWebhookLogsSafeRepositoryFailureCategory(t *testing.T) {
+	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
+	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(9, "victim", "private", "http://127.0.0.1/victim/private.git", true))
+	body := webhookBody(t, "refs/heads/gh-pages", "commit", "victim", "private", 9, "")
+
+	var logs bytes.Buffer
+	previousOutput, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
+	})
+
+	response := dispatchWebhook(t, fixture.deployer, signedHookRequest(body, fixture.credential.Key, fixture.credential.Secret, "delivery-out-of-scope"), "push")
+	if got, want := response.Code, http.StatusForbidden; got != want {
+		t.Fatalf("status = %d, want %d", got, want)
+	}
+	if got, want := logs.String(), "Webhook repository verification failed: repository out of scope\n"; got != want {
+		t.Errorf("log output = %q, want %q", got, want)
+	}
+	if strings.Contains(logs.String(), "victim") || strings.Contains(logs.String(), "private") {
+		t.Fatal("repository verification log leaked repository metadata")
+	}
+}
+
 func TestHandleWebhookRejectsReplayBeforeDeployment(t *testing.T) {
 	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
 	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(7, "alice", "site", "http://127.0.0.1/alice/site.git", false))

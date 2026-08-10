@@ -62,6 +62,7 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	repository, err := d.repositoryVerifier.Verify(r.Context(), authenticated.Principal, payload.Repository)
 	if err != nil {
+		logWebhookRepositoryFailure(err)
 		writeWebhookError(w, err)
 		return
 	}
@@ -122,6 +123,27 @@ func logWebhookAuthenticationFailure(err error) {
 	}
 	if category != "" {
 		log.Printf("Webhook authentication failed: %s", category)
+	}
+}
+
+// logWebhookRepositoryFailure records only a stable verification category. It
+// must never include repository metadata, URLs, access tokens, or payload data.
+func logWebhookRepositoryFailure(err error) {
+	var category string
+	switch {
+	case errors.Is(err, ErrRepositoryMismatch):
+		category = "repository mismatch"
+	case errors.Is(err, ErrRepositoryOutOfScope):
+		category = "repository out of scope"
+	case errors.Is(err, ErrUntrustedCloneURL):
+		category = "untrusted clone URL"
+	case errors.Is(err, ErrUntrustedRepositoryAPI):
+		category = "untrusted repository API"
+	case errors.Is(err, ErrRepositoryAccess):
+		category = "repository access unavailable"
+	}
+	if category != "" {
+		log.Printf("Webhook repository verification failed: %s", category)
 	}
 }
 
