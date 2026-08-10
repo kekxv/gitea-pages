@@ -308,7 +308,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	_ = tmpl.Execute(w, struct{ Username string }{Username: maskedUsername})
 }
 
-const oauthCallbackSuccessTemplate = `<!doctype html><html><body><h1>授权成功！</h1><p><strong>用户:</strong> {{.Username}}</p><p>⏳ 正在后台注册 Webhook...</p><p><a href="/">返回首页</a> | <a href="/status">查看状态</a></p></body></html>`
+const oauthCallbackSuccessTemplate = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gitea Pages - 授权成功</title><style>
+*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:600px;margin:0 auto;padding:20px;background:#f9fafb;min-height:100vh}.container{background:#fff;border-radius:16px;box-shadow:0 1px 3px #0000001a;overflow:hidden}.header{background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;padding:40px;text-align:center}.header h1{margin:0;font-size:28px}.content{padding:40px;text-align:center}.icon{font-size:64px}.user-name{font-weight:600;color:#1f2937;font-size:20px;margin:12px 0}.message{color:#6b7280;margin:20px 0}.notice{background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;color:#1d4ed8;padding:16px;margin:24px 0;font-size:14px}.btn{display:inline-block;background:#3b82f6;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:500;margin:10px}.btn:hover{background:#2563eb}.btn-secondary{background:#6b7280}.btn-secondary:hover{background:#4b5563}
+</style></head><body><div class="container"><div class="header"><h1>🎉 授权成功</h1></div><div class="content"><div class="icon">✅</div><div class="user-name">{{.Username}}</div><p class="message">已安全保存授权信息。</p><div class="notice">⏳ 正在后台注册并同步 Webhook，完成后可在“授权状态”查看结果。</div><p><a href="/status" class="btn">查看授权状态</a><a href="/" class="btn btn-secondary">返回首页</a></p></div></div></body></html>`
 
 // OAuthTokenResponse represents the token response
 type OAuthTokenResponse struct {

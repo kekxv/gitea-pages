@@ -525,6 +525,9 @@ func TestCallbackConsumesOAuthStateCookie(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("callback status = %d, want 200: %s", w.Code, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), `class="container"`) || !strings.Contains(w.Body.String(), `class="header"`) {
+		t.Errorf("callback success page did not render the styled status layout: %s", w.Body.String())
+	}
 	if strings.Contains(w.Body.String(), "<******") || !strings.Contains(w.Body.String(), "&lt;******") {
 		t.Errorf("callback success page did not escape masked username: %s", w.Body.String())
 	}
