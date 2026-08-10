@@ -36,7 +36,10 @@ grep -Eq '^FROM nginx:1\.29-alpine@sha256:[0-9a-f]{64}$' nginx/Dockerfile
 # DOMAIN build argument. They must still produce a safe image whose baked
 # domain cannot accidentally route a real deployment.
 docker build -t "${image}-default-domain" ./nginx
-default_nginx="$(docker run --rm "${image}-default-domain" nginx -T 2>&1)"
+# nginx -T resolves the private deployer upstream even though this build-only
+# check does not start Compose. Supply a loopback mapping so it is independent
+# of the CI runner's Docker DNS configuration.
+default_nginx="$(docker run --rm --add-host deployer:127.0.0.1 "${image}-default-domain" nginx -T 2>&1)"
 grep -Fq 'pages.invalid' <<<"$default_nginx"
 docker build --build-arg PAGES_DOMAIN=example.com -t "$image" ./nginx
 
