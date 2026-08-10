@@ -228,6 +228,18 @@ func TestMigrationEncryptsTokensRotatesUserAndOrganizationHooksAndHidesSecrets(t
 	if decoded.State != migrationManifestCompleted {
 		t.Fatalf("manifest state = %q, want completed", decoded.State)
 	}
+	for path, wantName := range map[string]string{
+		"/api/v1/user/hooks/11":             "Gitea Pages (user: alice)",
+		"/api/v1/orgs/engineering/hooks/22": "Gitea Pages (organization: engineering)",
+	} {
+		payload, ok := server.patch(path)
+		if !ok {
+			t.Fatalf("migration did not PATCH %s", path)
+		}
+		if got := payload.Name; got != wantName {
+			t.Errorf("webhook name for %s = %q, want %q", path, got, wantName)
+		}
+	}
 }
 
 func TestMigrationRequiresProtectedExistingBackup(t *testing.T) {
@@ -567,6 +579,7 @@ func (s *migrationGiteaServer) setOnPatch(callback func(string, migrationHookPat
 
 type migrationHookPatch struct {
 	Config              map[string]string `json:"config"`
+	Name                string            `json:"name"`
 	AuthorizationHeader string            `json:"authorization_header"`
 }
 

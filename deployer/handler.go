@@ -51,6 +51,7 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	authenticated, err := AuthenticateWebhook(r.Context(), r, d.hookStore)
 	if err != nil {
+		logWebhookAuthenticationFailure(err)
 		writeWebhookError(w, err)
 		return
 	}
@@ -99,6 +100,29 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = fmt.Fprintln(w, "Deployed successfully")
+}
+
+// logWebhookAuthenticationFailure records only a stable error category. It
+// must never include request headers, hook keys, signatures, or payload data.
+func logWebhookAuthenticationFailure(err error) {
+	var category string
+	switch {
+	case errors.Is(err, ErrInvalidAuthorization):
+		category = "invalid authorization"
+	case errors.Is(err, ErrMissingDeliveryID):
+		category = "missing delivery ID"
+	case errors.Is(err, ErrMissingSignature):
+		category = "missing signature"
+	case errors.Is(err, ErrUnknownHook):
+		category = "unknown hook"
+	case errors.Is(err, ErrInvalidSignature):
+		category = "invalid signature"
+	case errors.Is(err, ErrReplay):
+		category = "replayed delivery"
+	}
+	if category != "" {
+		log.Printf("Webhook authentication failed: %s", category)
+	}
 }
 
 func writeWebhookError(w http.ResponseWriter, err error) {
