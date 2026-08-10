@@ -204,6 +204,29 @@ func TestHandleWebhookLogsSafeRepositoryFailureCategory(t *testing.T) {
 	}
 }
 
+// This test fails if an unexpected clone origin is logged without a safe,
+// actionable category, or if the error text leaks the URL supplied by Gitea.
+func TestLogWebhookRepositoryFailureClassifiesCloneOriginMismatch(t *testing.T) {
+	var logs bytes.Buffer
+	previousOutput, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
+	})
+
+	logWebhookRepositoryFailure(ErrCloneURLOriginMismatch)
+	if got, want := logs.String(), "Webhook repository verification failed: untrusted clone URL: origin mismatch\n"; got != want {
+		t.Errorf("log output = %q, want %q", got, want)
+	}
+	if strings.Contains(logs.String(), "gitea.example.com") || strings.Contains(logs.String(), "alice/site") {
+		t.Fatal("repository verification log leaked clone URL metadata")
+	}
+}
+
 func TestHandleWebhookRejectsReplayBeforeDeployment(t *testing.T) {
 	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
 	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(7, "alice", "site", "http://127.0.0.1/alice/site.git", false))

@@ -135,6 +135,14 @@ func logWebhookRepositoryFailure(err error) {
 		category = "repository mismatch"
 	case errors.Is(err, ErrRepositoryOutOfScope):
 		category = "repository out of scope"
+	case errors.Is(err, ErrCloneURLInvalid):
+		category = "untrusted clone URL: invalid URL"
+	case errors.Is(err, ErrCloneURLSchemeMismatch):
+		category = "untrusted clone URL: scheme mismatch"
+	case errors.Is(err, ErrCloneURLOriginMismatch):
+		category = "untrusted clone URL: origin mismatch"
+	case errors.Is(err, ErrCloneURLPathMismatch):
+		category = "untrusted clone URL: path or query mismatch"
 	case errors.Is(err, ErrUntrustedCloneURL):
 		category = "untrusted clone URL"
 	case errors.Is(err, ErrUntrustedRepositoryAPI):

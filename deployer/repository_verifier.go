@@ -14,6 +14,10 @@ var (
 	ErrRepositoryMismatch     = errors.New("webhook repository does not match canonical repository")
 	ErrRepositoryOutOfScope   = errors.New("canonical repository is outside hook scope")
 	ErrUntrustedCloneURL      = errors.New("canonical repository clone URL is untrusted")
+	ErrCloneURLInvalid        = fmt.Errorf("%w: invalid URL", ErrUntrustedCloneURL)
+	ErrCloneURLSchemeMismatch = fmt.Errorf("%w: scheme mismatch", ErrUntrustedCloneURL)
+	ErrCloneURLOriginMismatch = fmt.Errorf("%w: origin mismatch", ErrUntrustedCloneURL)
+	ErrCloneURLPathMismatch   = fmt.Errorf("%w: path or query mismatch", ErrUntrustedCloneURL)
 	ErrUntrustedRepositoryAPI = errors.New("canonical repository API response is untrusted")
 	ErrRepositoryAccess       = errors.New("no access token for webhook principal")
 	ErrUnsupportedWebhook     = errors.New("unsupported webhook event")
@@ -204,22 +208,22 @@ func DecodeWebhook(body []byte, eventType string) (WebhookEvent, error) {
 // condition already enforced by configuration validation.
 func ValidateCanonicalCloneURL(raw string, apiBase *url.URL) (*url.URL, error) {
 	if apiBase == nil {
-		return nil, ErrUntrustedCloneURL
+		return nil, ErrCloneURLInvalid
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil || u.Hostname() == "" {
-		return nil, ErrUntrustedCloneURL
+		return nil, ErrCloneURLInvalid
 	}
 	if u.Scheme != "https" {
 		if u.Scheme != "http" || apiBase.Scheme != "http" || !isLocalDevelopmentHost(apiBase.Hostname()) {
-			return nil, ErrUntrustedCloneURL
+			return nil, ErrCloneURLSchemeMismatch
 		}
 	}
 	if !strings.EqualFold(u.Hostname(), apiBase.Hostname()) || effectivePort(u) != effectivePort(apiBase) {
-		return nil, ErrUntrustedCloneURL
+		return nil, ErrCloneURLOriginMismatch
 	}
 	if !strings.HasSuffix(u.EscapedPath(), ".git") || u.RawQuery != "" || u.Fragment != "" {
-		return nil, ErrUntrustedCloneURL
+		return nil, ErrCloneURLPathMismatch
 	}
 	return u, nil
 }

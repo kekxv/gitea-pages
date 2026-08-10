@@ -272,6 +272,41 @@ func TestValidateCanonicalCloneURL(t *testing.T) {
 	}
 }
 
+// This test fails if an operator cannot distinguish an unexpected Gitea
+// origin from other rejected clone URL forms without logging the URL itself.
+func TestValidateCanonicalCloneURLClassifiesOriginMismatch(t *testing.T) {
+	apiBase, err := url.Parse("https://gitea.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ValidateCanonicalCloneURL("https://gitea.example.com:8443/alice/site.git", apiBase)
+	if !errors.Is(err, ErrUntrustedCloneURL) {
+		t.Fatalf("ValidateCanonicalCloneURL() error = %v, want untrusted clone URL", err)
+	}
+	if !strings.Contains(err.Error(), "origin mismatch") {
+		t.Fatalf("clone URL rejection = %q, want origin mismatch category", err)
+	}
+}
+
+// This regression test uses the deployed Gitea API origin and canonical clone
+// URL reported for Caesar/blog. It fails if a normal HTTPS Gitea clone URL at
+// that same origin is rejected.
+func TestValidateCanonicalCloneURLAcceptsConfiguredGiteaOrigin(t *testing.T) {
+	apiBase, err := url.Parse("https://git.kekxv.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cloneURL, err := ValidateCanonicalCloneURL("https://git.kekxv.com/Caesar/blog.git", apiBase)
+	if err != nil {
+		t.Fatalf("ValidateCanonicalCloneURL() error = %v, want accepted configured Gitea origin", err)
+	}
+	if got, want := cloneURL.String(), "https://git.kekxv.com/Caesar/blog.git"; got != want {
+		t.Fatalf("clone URL = %q, want %q", got, want)
+	}
+}
+
 func TestDecodeWebhookExtractsOnlyCanonicalLookupFields(t *testing.T) {
 	body := []byte(`{
 		"ref":"refs/heads/gh-pages",
