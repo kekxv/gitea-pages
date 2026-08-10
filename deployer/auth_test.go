@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,5 +50,10 @@ func TestHandleStatusNoAuth(t *testing.T) {
 	webHandler.HandleStatus(response, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	for _, expected := range []string{"<style>", "class=\"container\"", "class=\"header\"", "class=\"btn btn-secondary\""} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Errorf("status page missing restored UI element %q", expected)
+		}
 	}
 }
