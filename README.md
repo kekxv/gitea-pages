@@ -159,7 +159,7 @@ of them are restored.
 
 **Root Site (username.pages.domain.com):**
 ```bash
-# Repository name format: username.pages.<domain>
+# Repository name format: username.<complete Pages domain>
 git init yourname.pages.example.com
 cd yourname.pages.example.com
 git checkout -b gh-pages
@@ -359,7 +359,7 @@ PAGES_GITEA_PUBLIC_URL=https://gitea.example.com
 
 **根目录站点 (username.pages.domain.com)：**
 ```bash
-# 仓库名格式：username.pages.<domain>
+# 仓库名格式：username.<完整 Pages 域名>
 git init yourname.pages.example.com
 cd yourname.pages.example.com
 git checkout -b gh-pages

@@ -48,7 +48,7 @@ func TestRootRepositoryMatchIsExact(t *testing.T) {
 
 func TestNewSiteTargetUsesOnlyExactRootRepositoryNames(t *testing.T) {
 	root := t.TempDir()
-	for _, repo := range []string{"alice", "ALICE.PAGES.EXAMPLE.COM"} {
+	for _, repo := range []string{"alice", "ALICE.EXAMPLE.COM"} {
 		target, err := NewSiteTarget(root, "Alice", repo, "Example.COM")
 		if err != nil {
 			t.Fatalf("NewSiteTarget(%q): %v", repo, err)
@@ -59,6 +59,23 @@ func TestNewSiteTargetUsesOnlyExactRootRepositoryNames(t *testing.T) {
 		if got, want := target.Path(), filepath.Join(root, "alice", "_root"); got != want {
 			t.Fatalf("target path = %q, want %q", got, want)
 		}
+	}
+}
+
+// This regression test uses the configured Pages domain and repository name
+// from bcr/bcr.pages.kekxv.com. It fails if DOMAIN already containing the
+// "pages" label is prefixed with a second "pages" during root-site matching.
+func TestNewSiteTargetAcceptsRootRepositoryForCompletePagesDomain(t *testing.T) {
+	root := t.TempDir()
+	target, err := NewSiteTarget(root, "bcr", "bcr.pages.kekxv.com", "pages.kekxv.com")
+	if err != nil {
+		t.Fatalf("NewSiteTarget() error = %v", err)
+	}
+	if !target.IsRoot() {
+		t.Fatal("complete Pages domain repository did not select the root site")
+	}
+	if got, want := target.Path(), filepath.Join(root, "bcr", "_root"); got != want {
+		t.Fatalf("target path = %q, want %q", got, want)
 	}
 }
 
