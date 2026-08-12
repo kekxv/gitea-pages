@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,15 +20,17 @@ import (
 type recordingDeployments struct {
 	mu          sync.Mutex
 	deployments []VerifiedRepository
+	targets     []SiteTarget
 	removals    []SiteTarget
 	deployErr   error
 	removeErr   error
 }
 
-func (d *recordingDeployments) Deploy(_ context.Context, repo VerifiedRepository, _ SiteTarget) error {
+func (d *recordingDeployments) Deploy(_ context.Context, repo VerifiedRepository, target SiteTarget) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.deployments = append(d.deployments, repo)
+	d.targets = append(d.targets, target)
 	return d.deployErr
 }
 
@@ -143,6 +146,27 @@ func TestHandleWebhookDeploysCanonicalRepositoryAndIgnoresPayloadCloneURL(t *tes
 	}
 	if got := fixture.deployments.deployments[0].CloneURL.String(); got == "https://attacker.example/steal.git" {
 		t.Fatalf("deployment accepted the payload clone URL %q", got)
+	}
+}
+
+// This end-to-end handler regression uses the bcr root-site repository name
+// with the complete configured Pages domain. It fails if root-site validation
+// turns this valid authenticated webhook into a 400 response.
+func TestHandleWebhookDeploysRootRepositoryForCompletePagesDomain(t *testing.T) {
+	principal := HookPrincipal{Username: "bcr-admin", ScopeType: ScopeOrganization, ScopeName: "bcr"}
+	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(104, "bcr", "bcr.pages.kekxv.com", "", false))
+	fixture.deployer.config.Domain = "pages.kekxv.com"
+	body := webhookBody(t, "refs/heads/gh-pages", "commit", "bcr", "bcr.pages.kekxv.com", 104, "")
+
+	response := dispatchWebhook(t, fixture.deployer, signedHookRequest(body, fixture.credential.Key, fixture.credential.Secret, "delivery-bcr-root"), "push")
+	if got, want := response.Code, http.StatusOK; got != want {
+		t.Fatalf("status = %d, want %d: %s", got, want, response.Body.String())
+	}
+	if got, want := fixture.deployments.deploymentCount(), 1; got != want {
+		t.Fatalf("deployment count = %d, want %d", got, want)
+	}
+	if got, want := fixture.deployments.targets[0].Path(), filepath.Join(fixture.deployer.config.PagesDir, "bcr", "_root"); got != want {
+		t.Fatalf("deployment target = %q, want %q", got, want)
 	}
 }
 
