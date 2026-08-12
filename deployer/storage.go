@@ -598,7 +598,7 @@ func (s *TokenStore) OrganizationHookAuthorizers(ctx context.Context, organizati
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT username FROM organization_hook_authorizers
-		WHERE organization_name = ?
+		WHERE organization_name = ? COLLATE NOCASE
 		ORDER BY authorized_at ASC, username ASC
 	`, organizationName)
 	if err != nil {
