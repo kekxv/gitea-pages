@@ -129,10 +129,32 @@ func (s *TokenStore) initDB() (err error) {
 	}
 
 	s.db = db
+	if err := s.backfillOrganizationHookAuthorizers(context.Background()); err != nil {
+		return fmt.Errorf("backfill organization hook authorizers: %w", err)
+	}
 	if err := s.cleanupExpiredDeliveries(context.Background()); err != nil {
 		return fmt.Errorf("failed to clean expired webhook deliveries: %w", err)
 	}
 	return nil
+}
+
+// backfillOrganizationHookAuthorizers restores the authorization association
+// for organization hooks created before that association was persisted. The
+// source is restricted to the hook credential itself, so this never grants an
+// arbitrary stored OAuth user access to an organization hook.
+func (s *TokenStore) backfillOrganizationHookAuthorizers(ctx context.Context) error {
+	if s.db == nil {
+		return fmt.Errorf("hook credential storage is unavailable")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO organization_hook_authorizers
+			(organization_name, username, hook_key, authorized_at)
+		SELECT scope_name, principal_username, hook_key, created_at
+		FROM hook_credentials
+		WHERE scope_type = ? AND principal_username <> ''
+		ON CONFLICT(organization_name, username) DO NOTHING
+	`, ScopeOrganization)
+	return err
 }
 
 // createSecureStorageSchema creates the encrypted token and hook credential
