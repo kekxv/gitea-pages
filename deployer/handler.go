@@ -156,19 +156,49 @@ func logWebhookRepositoryFailure(err error) {
 }
 
 func writeWebhookError(w http.ResponseWriter, err error) {
+	if apiErr := giteaAPIError(err); apiErr != nil {
+		status, code := http.StatusBadGateway, "gitea_api_error"
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized:
+			code = "gitea_token_rejected"
+		case http.StatusForbidden:
+			status, code = http.StatusForbidden, "gitea_repository_forbidden"
+		case http.StatusNotFound:
+			status, code = http.StatusNotFound, "gitea_repository_not_found"
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%s","gitea_status":%d}`, code, apiErr.StatusCode), status)
+		return
+	}
 	switch {
+	case errors.Is(err, ErrRepositoryAccess):
+		http.Error(w, `{"error":"oauth_token_unavailable"}`, http.StatusServiceUnavailable)
+		return
 	case errors.Is(err, ErrPayloadTooLarge):
 		http.Error(w, "Payload too large", http.StatusRequestEntityTooLarge)
 	case errors.Is(err, ErrInvalidAuthorization), errors.Is(err, ErrMissingDeliveryID),
 		errors.Is(err, ErrMissingSignature), errors.Is(err, ErrUnknownHook),
 		errors.Is(err, ErrInvalidSignature), errors.Is(err, ErrReplay):
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		code := "webhook_unauthorized"
+		if errors.Is(err, ErrInvalidSignature) {
+			code = "invalid_signature"
+		}
+		if errors.Is(err, ErrReplay) {
+			code = "webhook_replay"
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, code), http.StatusUnauthorized)
 	case errors.Is(err, ErrUnsupportedWebhook), errors.Is(err, ErrMalformedWebhook),
 		errors.Is(err, ErrInvalidPathComponent), errors.Is(err, ErrUnsafeSiteTarget):
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		http.Error(w, `{"error":"webhook_bad_request"}`, http.StatusBadRequest)
 	case errors.Is(err, ErrRepositoryMismatch), errors.Is(err, ErrRepositoryOutOfScope),
-		errors.Is(err, ErrUntrustedCloneURL), errors.Is(err, ErrUntrustedRepositoryAPI), errors.Is(err, ErrRepositoryAccess):
-		http.Error(w, "Repository forbidden", http.StatusForbidden)
+		errors.Is(err, ErrUntrustedCloneURL), errors.Is(err, ErrUntrustedRepositoryAPI):
+		code := "repository_forbidden"
+		if errors.Is(err, ErrRepositoryMismatch) {
+			code = "repository_mismatch"
+		}
+		if errors.Is(err, ErrRepositoryOutOfScope) {
+			code = "repository_out_of_scope"
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, code), http.StatusForbidden)
 	case errors.Is(err, ErrRepositoryTooLarge):
 		http.Error(w, "Repository too large", http.StatusRequestEntityTooLarge)
 	case errors.Is(err, ErrDeploymentSaturated):
@@ -176,8 +206,16 @@ func writeWebhookError(w http.ResponseWriter, err error) {
 		http.Error(w, "Deployment capacity exhausted", http.StatusTooManyRequests)
 	default:
 		log.Printf("Webhook handling failed: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 	}
+}
+
+func giteaAPIError(err error) *GiteaAPIError {
+	var target *GiteaAPIError
+	if errors.As(err, &target) {
+		return target
+	}
+	return nil
 }
 
 // IsGhPagesBranch identifies the deployment branch for push events.

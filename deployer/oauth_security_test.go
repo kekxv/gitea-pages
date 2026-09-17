@@ -505,6 +505,45 @@ func TestRefreshAccessTokenUsesEncodedForm(t *testing.T) {
 	}
 }
 
+func TestRefreshAllTokensClearsStaleExpiryWhenRefreshOmitsExpiresIn(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"fresh-access","token_type":"bearer"}`))
+	}))
+	defer server.Close()
+
+	store, err := NewTokenStore(t.TempDir(), bytes.Repeat([]byte("k"), 32))
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	if err := store.Set("caesar", &UserToken{
+		AccessToken:  "stale-access",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("store token: %v", err)
+	}
+
+	h := NewOAuthHandler(&OAuthConfig{
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		TokenURL:     server.URL + "/token",
+	}, store, "https://pages.example.com/webhook", "session-secret")
+	h.RefreshAllTokens()
+
+	got := store.Get("caesar")
+	if got == nil || got.AccessToken != "fresh-access" {
+		t.Fatalf("refreshed token = %#v", got)
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Fatalf("stale expiry was retained: %v", got.ExpiresAt)
+	}
+}
+
 func TestCallbackConsumesOAuthStateCookie(t *testing.T) {
 	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

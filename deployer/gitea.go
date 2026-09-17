@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+type GiteaAPIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *GiteaAPIError) Error() string {
+	return fmt.Sprintf("Gitea API returned status %d: %s", e.StatusCode, e.Message)
+}
+
 // GiteaClient handles Gitea API operations
 type GiteaClient struct {
 	apiURL      string
@@ -67,7 +76,12 @@ func (c *GiteaClient) GetRepoInfoContext(ctx context.Context, owner, repo string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		var message struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(body, &message)
+		return nil, &GiteaAPIError{StatusCode: resp.StatusCode, Message: message.Message}
 	}
 
 	body, err := io.ReadAll(resp.Body)

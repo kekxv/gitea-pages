@@ -505,6 +505,11 @@ func (h *OAuthHandler) RefreshAllTokens() {
 			}
 			if newToken.ExpiresIn > 0 {
 				updated.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+			} else {
+				// Gitea may omit expires_in for a refreshed token. Keeping the
+				// previous expiry here would leave the newly refreshed access token
+				// unusable because that timestamp is already in the past.
+				updated.ExpiresAt = time.Time{}
 			}
 			updated.CreatedAt = time.Now()
 			return updated
@@ -882,6 +887,24 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 	if err != nil {
 		return err
 	}
+	for _, existing := range existingHooks {
+		if existing.Active && existing.Config.ContentType == "json" && existing.BranchFilter == "gh-pages" && hasWebhookEvents(existing.Events) {
+			const prefix = "Gitea-Pages "
+			if strings.HasPrefix(existing.AuthorizationHeader, prefix) {
+				keyBytes, decodeErr := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(existing.AuthorizationHeader, prefix))
+				if decodeErr == nil {
+					credential, getErr := h.store.GetHook(ctx, string(keyBytes))
+					if getErr == nil && credential != nil && credential.GiteaHookID == existing.ID && credential.Principal() == principal {
+						if principal.ScopeType == ScopeOrganization {
+							_ = h.store.PutOrganizationHookAuthorizer(ctx, principal.ScopeName, principal.Username, credential.Key)
+						}
+						log.Printf("Reusing valid existing webhook %d for %s", existing.ID, principal.ScopeName)
+						return nil
+					}
+				}
+			}
+		}
+	}
 
 	credential, err := createHookCredential(principal)
 	if err != nil {
@@ -916,6 +939,19 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 	return nil
 }
 
+func hasWebhookEvents(events []string) bool {
+	var push, del bool
+	for _, event := range events {
+		if event == "push" {
+			push = true
+		}
+		if event == "delete" {
+			del = true
+		}
+	}
+	return push && del
+}
+
 func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interface{} {
 	return map[string]interface{}{
 		"name": hookDisplayName(credential.Principal()),
@@ -945,7 +981,7 @@ func (h *OAuthHandler) findScopedHooks(token string, principal HookPrincipal) ([
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil
+		return nil, fmt.Errorf("list existing webhooks: HTTP %d", resp.StatusCode)
 	}
 	var hooks []webhookInfo
 	if err := json.NewDecoder(resp.Body).Decode(&hooks); err != nil {
