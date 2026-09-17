@@ -91,6 +91,17 @@ assert_status() {
 
 test "$(curl --silent --fail -H 'Host: alice.pages.example.com' "http://127.0.0.1:${host_port}/")" = 'Alice root site'
 test "$(curl --silent --fail -H 'Host: alice.pages.example.com' "http://127.0.0.1:${host_port}/project/index.html")" = 'Alice project site'
+# Directory slash redirects must retain the browser's public origin behind
+# a TLS-terminating proxy, rather than exposing the container's HTTP port.
+redirect_headers="$(curl --silent --show-error --max-time 2 --dump-header - --output /dev/null \
+    -H 'Host: alice.pages.example.com' -H 'X-Forwarded-Proto: https' \
+    "http://127.0.0.1:${host_port}/project?view=1")"
+grep -Eq '^HTTP/1\.[01] 301 ' <<<"$redirect_headers"
+if ! grep -Eq $'^Location: /project/\\?view=1\r?$' <<<"$redirect_headers"; then
+    printf 'Unexpected directory redirect:\n%s\n' "$redirect_headers" >&2
+    exit 1
+fi
+test "$(curl --silent --fail -H 'Host: alice.pages.example.com' "http://127.0.0.1:${host_port}/project/")" = 'Alice project site'
 assert_status 421 alice.pages.attacker.com /
 assert_status 421 alice.pages.example.com.attacker.com /
 assert_status 403 alice.pages.example.com /.hidden
