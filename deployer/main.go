@@ -351,9 +351,8 @@ func main() {
 
 		oauthHandler = NewOAuthHandler(oauthConfig, tokenStore, webhookURL, string(config.SessionSecret))
 		webHandler.oauthConfig = oauthConfig
-		// Start background token refresh (every 24 hours)
-		// This proactively refreshes tokens before they expire
-		oauthHandler.StartBackgroundRefresh(24)
+		repositoryVerifier.oauthHandler = oauthHandler
+		oauthHandler.StartBackgroundRefresh()
 	}
 
 	// Setup routes

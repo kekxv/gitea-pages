@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -62,9 +63,10 @@ type RepositoryVerifier interface {
 // token, or for organization hooks only, another stored administrator that
 // authorized the same organization hook scope.
 type GiteaRepositoryVerifier struct {
-	apiBase    *url.URL
-	cloneBase  *url.URL
-	tokenStore *TokenStore
+	apiBase      *url.URL
+	cloneBase    *url.URL
+	tokenStore   *TokenStore
+	oauthHandler *OAuthHandler
 }
 
 func NewRepositoryVerifier(apiURL string, tokenStore *TokenStore) (*GiteaRepositoryVerifier, error) {
@@ -191,6 +193,14 @@ func (v *GiteaRepositoryVerifier) tokenForPrincipal(ctx context.Context, princip
 }
 
 func (v *GiteaRepositoryVerifier) usableToken(username string) string {
+	if v.oauthHandler != nil {
+		token, err := v.oauthHandler.usableAccessToken(username)
+		if err != nil {
+			log.Printf("OAuth token unavailable for webhook principal %s: %v", username, err)
+			return ""
+		}
+		return token
+	}
 	token := v.tokenStore.Get(username)
 	if token == nil || token.AccessToken == "" || (!token.ExpiresAt.IsZero() && !token.ExpiresAt.After(time.Now())) {
 		return ""

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,10 +47,11 @@ type UserToken struct {
 
 // OAuthHandler handles OAuth2 authentication
 type OAuthHandler struct {
-	config     *OAuthConfig
-	store      *TokenStore
-	webhookURL string
-	secret     string
+	config       *OAuthConfig
+	store        *TokenStore
+	webhookURL   string
+	secret       string
+	refreshLocks sync.Map // Per-user locks shared by scheduled and request refreshes.
 }
 
 // NewOAuthHandler creates a new OAuth handler
@@ -286,7 +288,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to save token", http.StatusInternalServerError)
 		return
 	}
-	if err := h.store.Set(userToken.Username, userToken); err != nil {
+	lock := h.tokenRefreshLock(userToken.Username)
+	lock.Lock()
+	err = h.store.Set(userToken.Username, userToken)
+	lock.Unlock()
+	if err != nil {
 		log.Printf("Failed to persist OAuth token: %v", err)
 		http.Error(w, "Failed to save token", http.StatusInternalServerError)
 		return
@@ -441,8 +447,17 @@ func (h *OAuthHandler) refreshAccessToken(refreshToken string) (*OAuthTokenRespo
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Token refresh failed: status %d", resp.StatusCode)
-		return nil, fmt.Errorf("token refresh failed: status %d", resp.StatusCode)
+		var failure struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(bodyBytes, &failure)
+		// Only log recognized OAuth codes; upstream descriptions may contain secrets.
+		code := "unknown_error"
+		switch failure.Error {
+		case "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "server_error", "temporarily_unavailable":
+			code = failure.Error
+		}
+		return nil, fmt.Errorf("token refresh failed: status %d, oauth_error=%s", resp.StatusCode, code)
 	}
 
 	var token OAuthTokenResponse
@@ -450,8 +465,72 @@ func (h *OAuthHandler) refreshAccessToken(refreshToken string) (*OAuthTokenRespo
 		return nil, err
 	}
 
-	log.Printf("Token refreshed successfully")
+	if token.AccessToken == "" || token.ExpiresIn < 0 {
+		return nil, errors.New("invalid token refresh response")
+	}
 	return &token, nil
+}
+
+const tokenRefreshInterval = time.Minute
+const tokenRefreshLeeway = 5 * time.Minute
+
+func (h *OAuthHandler) tokenRefreshLock(username string) *sync.Mutex {
+	lock, _ := h.refreshLocks.LoadOrStore(strings.ToLower(username), &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+// usableAccessToken reloads under the per-user lock so refresh-token rotation
+// cannot race between webhook requests, the scheduler and authorization saves.
+func (h *OAuthHandler) usableAccessToken(username string) (string, error) {
+	lock := h.tokenRefreshLock(username)
+	lock.Lock()
+	defer lock.Unlock()
+	token := h.store.Get(username)
+	if token == nil || token.AccessToken == "" {
+		return "", errors.New("token missing; authorization required")
+	}
+	now := time.Now()
+	if !token.ExpiresAt.IsZero() && token.ExpiresAt.After(now.Add(tokenRefreshLeeway)) {
+		return token.AccessToken, nil
+	}
+	// Unknown expiry is rechecked periodically, not assumed to last forever.
+	if token.ExpiresAt.IsZero() && token.CreatedAt.Add(tokenRefreshInterval).After(now) {
+		return token.AccessToken, nil
+	}
+	valid := token.ExpiresAt.IsZero() || token.ExpiresAt.After(now)
+	if token.RefreshToken == "" {
+		if valid {
+			return token.AccessToken, nil
+		}
+		return "", errors.New("token expired and refresh token missing; authorization required")
+	}
+	newToken, err := h.refreshAccessToken(token.RefreshToken)
+	if err != nil {
+		log.Printf("OAuth refresh failed for %s: %v", username, err)
+		if !token.ExpiresAt.IsZero() && token.ExpiresAt.After(time.Now()) {
+			return token.AccessToken, nil
+		}
+		return "", err
+	}
+	expiresAt := time.Time{}
+	if newToken.ExpiresIn > 0 {
+		expiresAt = now.Add(time.Duration(newToken.ExpiresIn) * time.Second)
+	}
+	err = h.store.UpdateToken(username, func(updated UserToken) UserToken {
+		updated.AccessToken = newToken.AccessToken
+		updated.TokenType = newToken.TokenType
+		if newToken.RefreshToken != "" {
+			updated.RefreshToken = newToken.RefreshToken
+		}
+		updated.CreatedAt = now
+		updated.ExpiresAt = expiresAt
+		return updated
+	})
+	if err != nil {
+		return "", fmt.Errorf("persist refreshed token: %w", err)
+	}
+	log.Printf("OAuth token refreshed for %s (expires_at=%s, expires_in=%d)", username, expiresAt.Format(time.RFC3339), newToken.ExpiresIn)
+	return newToken.AccessToken, nil
 }
 
 // RefreshAllTokens refreshes all stored tokens proactively
@@ -463,68 +542,14 @@ func (h *OAuthHandler) RefreshAllTokens() {
 
 	users := h.store.List()
 	for _, username := range users {
-		token := h.store.Get(username)
-		if token == nil {
-			continue
+		if _, err := h.usableAccessToken(username); err != nil {
+			log.Printf("OAuth token unavailable for %s: %v", username, err)
 		}
-
-		// Skip if no refresh token available
-		if token.RefreshToken == "" {
-			log.Printf("No refresh token for %s, user needs to re-authorize", username)
-			continue
-		}
-
-		// Check if token needs refresh (expires within 7 days or already expired)
-		shouldRefresh := false
-		if token.ExpiresAt.IsZero() {
-			// No expiration set, refresh anyway to be safe
-			shouldRefresh = true
-		} else if time.Now().Add(7 * 24 * time.Hour).After(token.ExpiresAt) {
-			// Expires within 7 days, refresh now
-			shouldRefresh = true
-		}
-
-		if !shouldRefresh {
-			continue
-		}
-
-		log.Printf("Proactively refreshing token for %s (expires at %s)", username, token.ExpiresAt.Format("2006-01-02 15:04:05"))
-
-		newToken, err := h.refreshAccessToken(token.RefreshToken)
-		if err != nil {
-			log.Printf("Failed to refresh token for %s: %v", username, err)
-			// Token refresh failed, user needs to re-authorize
-			continue
-		}
-
-		if err := h.store.UpdateToken(username, func(updated UserToken) UserToken {
-			updated.AccessToken = newToken.AccessToken
-			updated.TokenType = newToken.TokenType
-			if newToken.RefreshToken != "" {
-				updated.RefreshToken = newToken.RefreshToken
-			}
-			if newToken.ExpiresIn > 0 {
-				updated.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
-			} else {
-				// Gitea may omit expires_in for a refreshed token. Keeping the
-				// previous expiry here would leave the newly refreshed access token
-				// unusable because that timestamp is already in the past.
-				updated.ExpiresAt = time.Time{}
-			}
-			updated.CreatedAt = time.Now()
-			return updated
-		}); err != nil {
-			log.Printf("Failed to persist refreshed token for %s: %v", username, err)
-			continue
-		}
-
-		log.Printf("Token refreshed successfully for %s", username)
 	}
 }
 
 // StartBackgroundRefresh starts a background goroutine that periodically refreshes tokens
-// interval is the time between refresh checks (in hours)
-func (h *OAuthHandler) StartBackgroundRefresh(intervalHours int) {
+func (h *OAuthHandler) StartBackgroundRefresh() {
 	if h.store == nil {
 		return
 	}
@@ -535,16 +560,20 @@ func (h *OAuthHandler) StartBackgroundRefresh(intervalHours int) {
 
 	// Start background refresh loop
 	go func() {
-		ticker := time.NewTicker(time.Duration(intervalHours) * time.Hour)
+		ticker := time.NewTicker(tokenRefreshInterval)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			log.Printf("Running scheduled token refresh check...")
-			h.RefreshAllTokens()
+		for {
+			select {
+			case <-h.store.cleanupStop:
+				return
+			case <-ticker.C:
+				h.RefreshAllTokens()
+			}
 		}
 	}()
 
-	log.Printf("Background token refresh started (interval: %d hours)", intervalHours)
+	log.Printf("Background token refresh started (interval: %s, refresh before expiry: %s)", tokenRefreshInterval, tokenRefreshLeeway)
 }
 
 func min(a, b int) int {
