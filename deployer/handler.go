@@ -60,7 +60,18 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeWebhookError(w, err)
 		return
 	}
-	repository, err := d.repositoryVerifier.Verify(r.Context(), authenticated.Principal, payload.Repository)
+	repositoryDelete := (payload.Kind == "repository" && payload.Action == "delete") || (payload.Kind == "delete" && payload.RefType == "repository")
+	var repository *VerifiedRepository
+	if repositoryDelete {
+		deletedVerifier, ok := d.repositoryVerifier.(DeletedRepositoryVerifier)
+		if !ok {
+			writeWebhookError(w, ErrRepositoryAccess)
+			return
+		}
+		repository, err = deletedVerifier.VerifyDeleted(r.Context(), authenticated.Principal, payload.Repository)
+	} else {
+		repository, err = d.repositoryVerifier.Verify(r.Context(), authenticated.Principal, payload.Repository)
+	}
 	if err != nil {
 		logWebhookRepositoryFailure(err)
 		writeWebhookError(w, err)
@@ -72,13 +83,13 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !IsGhPagesBranch(payload.Ref) && !(payload.Kind == "delete" && payload.Ref == "gh-pages") {
+	if repositoryDelete {
+		err = d.deployments.Remove(r.Context(), target)
+	} else if !IsGhPagesBranch(payload.Ref) && !(payload.Kind == "delete" && payload.Ref == "gh-pages") {
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, "Ignored: not gh-pages branch")
 		return
-	}
-
-	if payload.Kind == "delete" {
+	} else if payload.Kind == "delete" {
 		if payload.RefType != "branch" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = fmt.Fprintln(w, "Ignored: not a branch")
@@ -96,7 +107,7 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	if payload.Kind == "delete" || payload.After == deletedGitReference {
+	if repositoryDelete || payload.Kind == "delete" || payload.After == deletedGitReference {
 		_, _ = fmt.Fprintln(w, "Site removed successfully")
 		return
 	}

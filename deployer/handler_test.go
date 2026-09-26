@@ -185,6 +185,37 @@ func TestHandleWebhookRemovesVerifiedGhPagesDelete(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookRemovesSiteWhenRepositoryIsDeleted(t *testing.T) {
+	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
+	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(7, "alice", "site", "", false))
+	body := []byte(`{"action":"delete","repository":{"id":7,"name":"site","owner":{"username":"alice"}}}`)
+
+	response := dispatchWebhook(t, fixture.deployer, signedHookRequest(body, fixture.credential.Key, fixture.credential.Secret, "delivery-repository-delete"), "repository")
+	if got, want := response.Code, http.StatusOK; got != want {
+		t.Fatalf("status = %d, want %d: %s", got, want, response.Body.String())
+	}
+	if got := fixture.deployments.removalCount(); got != 1 {
+		t.Fatalf("removal count = %d, want 1", got)
+	}
+	if got, want := fixture.deployments.removals[0].Path(), filepath.Join(fixture.deployer.config.PagesDir, "alice", "site"); got != want {
+		t.Fatalf("removal target = %q, want %q", got, want)
+	}
+}
+
+func TestHandleWebhookRejectsRepositoryDeletionOutsideHookScope(t *testing.T) {
+	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
+	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(7, "alice", "site", "", false))
+	body := []byte(`{"action":"delete","repository":{"id":8,"name":"other","owner":{"username":"bob"}}}`)
+
+	response := dispatchWebhook(t, fixture.deployer, signedHookRequest(body, fixture.credential.Key, fixture.credential.Secret, "delivery-repository-delete-cross-scope"), "repository")
+	if got, want := response.Code, http.StatusForbidden; got != want {
+		t.Fatalf("status = %d, want %d: %s", got, want, response.Body.String())
+	}
+	if got := fixture.deployments.removalCount(); got != 0 {
+		t.Fatalf("removal count = %d, want 0", got)
+	}
+}
+
 func TestHandleWebhookRejectsCrossTenantPrivateRepositoryBeforeDeployment(t *testing.T) {
 	principal := HookPrincipal{Username: "attacker", ScopeType: ScopeUser, ScopeName: "attacker"}
 	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(9, "victim", "private", "http://127.0.0.1/victim/private.git", true))

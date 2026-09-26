@@ -54,7 +54,7 @@ func TestRegistrationReusesValidHook(t *testing.T) {
 			http.Error(w, "unexpected", 500)
 			return
 		}
-		json.NewEncoder(w).Encode([]webhookInfo{{ID: 42, Type: "gitea", Active: true, BranchFilter: "gh-pages", Events: []string{"delete", "push"}, Config: webhookConfig{URL: "https://pages.example.com/webhook", ContentType: "json"}, AuthorizationHeader: "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(c.Key))}})
+		json.NewEncoder(w).Encode([]webhookInfo{{ID: 42, Type: "gitea", Active: true, BranchFilter: "gh-pages", Events: []string{"delete", "push", "repository"}, Config: webhookConfig{URL: "https://pages.example.com/webhook", ContentType: "json"}, AuthorizationHeader: "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(c.Key))}})
 	}))
 	defer s.Close()
 	h := NewOAuthHandler(&OAuthConfig{APIURL: s.URL}, store, "https://pages.example.com/webhook", "session")

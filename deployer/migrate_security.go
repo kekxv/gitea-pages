@@ -597,7 +597,7 @@ func secureHookPayload(webhookURL string, credential HookCredential) map[string]
 	return map[string]interface{}{
 		"name": hookDisplayName(credential.Principal()),
 		"type": "gitea", "config": map[string]string{"url": webhookURL, "content_type": "json", "secret": string(credential.Secret)},
-		"events": []string{"push", "delete"}, "active": true, "branch_filter": "gh-pages",
+		"events": []string{"push", "delete", "repository"}, "active": true, "branch_filter": "gh-pages",
 		"authorization_header": "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(credential.Key)),
 	}
 }

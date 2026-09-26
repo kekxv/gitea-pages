@@ -48,6 +48,7 @@ type PayloadRepository struct {
 // WebhookEvent is the safe subset of a supported Gitea webhook event.
 type WebhookEvent struct {
 	Kind       string
+	Action     string
 	Ref        string
 	After      string
 	RefType    string
@@ -56,6 +57,12 @@ type WebhookEvent struct {
 
 type RepositoryVerifier interface {
 	Verify(ctx context.Context, principal HookPrincipal, payload PayloadRepository) (*VerifiedRepository, error)
+}
+
+// DeletedRepositoryVerifier validates the signed repository identity for a
+// repository deletion after the Gitea API has removed the repository.
+type DeletedRepositoryVerifier interface {
+	VerifyDeleted(ctx context.Context, principal HookPrincipal, payload PayloadRepository) (*VerifiedRepository, error)
 }
 
 // GiteaRepositoryVerifier resolves untrusted webhook repository references
@@ -149,6 +156,26 @@ func (v *GiteaRepositoryVerifier) Verify(ctx context.Context, principal HookPrin
 	}, nil
 }
 
+// VerifyDeleted validates only the hook scope and repository identity. A
+// deleted repository cannot be fetched from Gitea, so the authenticated hook
+// scope is the authority for the owner and the payload name is still checked
+// by NewSiteTarget before any filesystem operation.
+func (v *GiteaRepositoryVerifier) VerifyDeleted(_ context.Context, principal HookPrincipal, payload PayloadRepository) (*VerifiedRepository, error) {
+	if v == nil {
+		return nil, ErrRepositoryAccess
+	}
+	if principal.ScopeType != ScopeUser && principal.ScopeType != ScopeOrganization {
+		return nil, ErrRepositoryOutOfScope
+	}
+	if payload.ID <= 0 || payload.Name == "" || payload.OwnerUsername == "" {
+		return nil, ErrRepositoryMismatch
+	}
+	if payload.OwnerUsername != principal.ScopeName {
+		return nil, ErrRepositoryOutOfScope
+	}
+	return &VerifiedRepository{ID: payload.ID, Owner: payload.OwnerUsername, Name: payload.Name}, nil
+}
+
 // CanonicalCloneURL constructs the only clone endpoint deployment may use
 // after Gitea has authenticated and verified the repository identity. It does
 // not trust presentation fields such as clone_url from either webhook or API
@@ -211,10 +238,11 @@ func (v *GiteaRepositoryVerifier) usableToken(username string) string {
 // DecodeWebhook extracts only fields that are later verified against Gitea.
 // Clone and privacy values from the signed but untrusted payload are omitted.
 func DecodeWebhook(body []byte, eventType string) (WebhookEvent, error) {
-	if eventType != "push" && eventType != "delete" {
+	if eventType != "push" && eventType != "delete" && eventType != "repository" {
 		return WebhookEvent{}, ErrUnsupportedWebhook
 	}
 	var payload struct {
+		Action     string `json:"action"`
 		Ref        string `json:"ref"`
 		After      string `json:"after"`
 		RefType    string `json:"ref_type"`
@@ -229,7 +257,13 @@ func DecodeWebhook(body []byte, eventType string) (WebhookEvent, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return WebhookEvent{}, fmt.Errorf("%w: %v", ErrMalformedWebhook, err)
 	}
-	if payload.Ref == "" || payload.Repository.ID <= 0 || payload.Repository.Name == "" || payload.Repository.Owner.Username == "" {
+	if eventType == "repository" && payload.Action != "delete" {
+		return WebhookEvent{}, ErrUnsupportedWebhook
+	}
+	if eventType != "repository" && !(eventType == "delete" && payload.RefType == "repository") && (payload.Ref == "" || payload.Repository.ID <= 0 || payload.Repository.Name == "" || payload.Repository.Owner.Username == "") {
+		return WebhookEvent{}, ErrMalformedWebhook
+	}
+	if eventType == "repository" && (payload.Repository.ID <= 0 || payload.Repository.Name == "" || payload.Repository.Owner.Username == "") {
 		return WebhookEvent{}, ErrMalformedWebhook
 	}
 	if eventType == "delete" && payload.RefType == "" {
@@ -237,6 +271,7 @@ func DecodeWebhook(body []byte, eventType string) (WebhookEvent, error) {
 	}
 	return WebhookEvent{
 		Kind:    eventType,
+		Action:  payload.Action,
 		Ref:     payload.Ref,
 		After:   payload.After,
 		RefType: payload.RefType,

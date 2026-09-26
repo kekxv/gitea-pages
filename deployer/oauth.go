@@ -969,7 +969,7 @@ func (h *OAuthHandler) registerScopedHook(token string, principal HookPrincipal)
 }
 
 func hasWebhookEvents(events []string) bool {
-	var push, del bool
+	var push, del, repository bool
 	for _, event := range events {
 		if event == "push" {
 			push = true
@@ -977,8 +977,11 @@ func hasWebhookEvents(events []string) bool {
 		if event == "delete" {
 			del = true
 		}
+		if event == "repository" {
+			repository = true
+		}
 	}
-	return push && del
+	return push && del && repository
 }
 
 func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interface{} {
@@ -990,7 +993,7 @@ func (h *OAuthHandler) hookPayload(credential HookCredential) map[string]interfa
 			"content_type": "json",
 			"secret":       string(credential.Secret),
 		},
-		"events":               []string{"push", "delete"},
+		"events":               []string{"push", "delete", "repository"},
 		"active":               true,
 		"branch_filter":        "gh-pages",
 		"authorization_header": "Gitea-Pages " + base64.RawURLEncoding.EncodeToString([]byte(credential.Key)),

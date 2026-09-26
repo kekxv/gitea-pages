@@ -17,7 +17,7 @@ A GitHub Pages-like static site hosting system for Gitea. Automatically deploys 
 ### Features
 
 - **Zero User Action**: Push to `gh-pages` branch → automatic deployment
-- **Automatic Cleanup**: Delete `gh-pages` branch → site automatically removed
+- **Automatic Cleanup**: Delete `gh-pages` branch or repository → site automatically removed
 - **Wildcard Domain Routing**: `username.pages.yourdomain.com` and `username.pages.yourdomain.com/repo`
 - **Security Hardened**: Non-root containers, symlink blocking, path traversal protection
 - **Private Repo Support**: OAuth2 user authorization
@@ -269,7 +269,7 @@ MIT License
 ### 功能特性
 
 - **零用户操作**：推送代码到 `gh-pages` 分支 → 自动部署
-- **自动清理**：删除 `gh-pages` 分支 → 自动删除站点
+- **自动清理**：删除 `gh-pages` 分支或仓库 → 自动删除站点
 - **泛域名路由**：支持 `username.pages.yourdomain.com` 和 `username.pages.yourdomain.com/repo`
 - **安全加固**：非 root 容器、阻止软链接、路径遍历防护
 - **私有仓库支持**：OAuth2 用户授权

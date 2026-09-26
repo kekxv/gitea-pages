@@ -412,6 +412,31 @@ func TestDecodeWebhookExtractsOnlyCanonicalLookupFields(t *testing.T) {
 	}
 }
 
+func TestDecodeWebhookAcceptsRepositoryDeletion(t *testing.T) {
+	body := []byte(`{"action":"delete","repository":{"id":7,"name":"site","owner":{"username":"alice"}}}`)
+	event, err := DecodeWebhook(body, "repository")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != "repository" || event.Action != "delete" {
+		t.Fatalf("event = %#v, want repository deletion", event)
+	}
+	if event.Repository != (PayloadRepository{ID: 7, Name: "site", OwnerUsername: "alice"}) {
+		t.Fatalf("repository = %#v", event.Repository)
+	}
+}
+
+func TestDecodeWebhookAcceptsRepositoryDeletionUsingDeleteEvent(t *testing.T) {
+	body := []byte(`{"ref_type":"repository","repository":{"id":7,"name":"site","owner":{"username":"alice"}}}`)
+	event, err := DecodeWebhook(body, "delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.RefType != "repository" || event.Repository.Name != "site" {
+		t.Fatalf("event = %#v, want repository deletion", event)
+	}
+}
+
 func newVerifierWithRepo(t *testing.T, repo RepoInfo) RepositoryVerifier {
 	t.Helper()
 	if repo.Owner.Username == "" {
