@@ -32,7 +32,10 @@ func validateComponent(kind, value string) (string, error) {
 	if value == "." || value == ".." || !giteaPathComponent.MatchString(value) || strings.Contains(value, "..") {
 		return "", fmt.Errorf("%s: %w", kind, ErrInvalidPathComponent)
 	}
-	return strings.ToLower(value), nil
+	// Gitea repository and owner names are case-sensitive path components.
+	// Preserve the canonical spelling so `Alice/Site` and `alice/site` remain
+	// distinct deployments, matching GitHub Pages behavior.
+	return value, nil
 }
 
 // NewSiteTarget validates canonical Gitea repository metadata and constructs

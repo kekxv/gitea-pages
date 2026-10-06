@@ -48,7 +48,7 @@ func TestRootRepositoryMatchIsExact(t *testing.T) {
 
 func TestNewSiteTargetUsesOnlyExactRootRepositoryNames(t *testing.T) {
 	root := t.TempDir()
-	for _, repo := range []string{"alice", "ALICE.EXAMPLE.COM"} {
+	for _, repo := range []string{"Alice", "Alice.Example.COM"} {
 		target, err := NewSiteTarget(root, "Alice", repo, "Example.COM")
 		if err != nil {
 			t.Fatalf("NewSiteTarget(%q): %v", repo, err)
@@ -56,7 +56,7 @@ func TestNewSiteTargetUsesOnlyExactRootRepositoryNames(t *testing.T) {
 		if !target.IsRoot() {
 			t.Fatalf("repository %q did not select the root site", repo)
 		}
-		if got, want := target.Path(), filepath.Join(root, "alice", "_root"); got != want {
+		if got, want := target.Path(), filepath.Join(root, "Alice", "_root"); got != want {
 			t.Fatalf("target path = %q, want %q", got, want)
 		}
 	}

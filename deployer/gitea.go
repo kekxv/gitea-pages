@@ -1,14 +1,52 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+const deploymentStatusContext = "continuous-integration/gitea-pages"
+
+// CreateCommitStatus publishes the result of a deployment for one commit.
+// Gitea accepts the same success state used by its CI integrations.
+func (c *GiteaClient) CreateCommitStatus(ctx context.Context, owner, repo, sha, targetURL string) error {
+	if c == nil || c.apiURL == "" || c.accessToken == "" || owner == "" || repo == "" || sha == "" {
+		return fmt.Errorf("commit status client is not configured")
+	}
+	endpoint := fmt.Sprintf("%s/api/v1/repos/%s/%s/statuses/%s", c.apiURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
+	payload, err := json.Marshal(map[string]string{
+		"state":       "success",
+		"context":     deploymentStatusContext,
+		"description": "Gitea Pages deployment succeeded",
+		"target_url":  targetURL,
+	})
+	if err != nil {
+		return fmt.Errorf("encode commit status: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create commit status request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := noRedirectHTTPClient(nil, 10*time.Second, ErrUntrustedRepositoryAPI).Do(req)
+	if err != nil {
+		return fmt.Errorf("commit status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &GiteaAPIError{StatusCode: resp.StatusCode, Message: string(body)}
+	}
+	return nil
+}
 
 type GiteaAPIError struct {
 	StatusCode int
@@ -23,6 +61,19 @@ func (e *GiteaAPIError) Error() string {
 type GiteaClient struct {
 	apiURL      string
 	accessToken string
+}
+
+type giteaCommitStatusReporter struct{ apiURL string }
+
+func (r *giteaCommitStatusReporter) ReportDeploymentSuccess(ctx context.Context, repo VerifiedRepository, sha string) error {
+	if r == nil {
+		return fmt.Errorf("commit status reporter is not configured")
+	}
+	return NewGiteaClient(r.apiURL, repo.AccessToken).CreateCommitStatus(ctx, repo.Owner, repo.Name, sha, "")
+}
+
+func NewGiteaCommitStatusReporter(apiURL string) CommitStatusReporter {
+	return &giteaCommitStatusReporter{apiURL: strings.TrimSuffix(apiURL, "/")}
 }
 
 // NewGiteaClient creates a new Gitea API client

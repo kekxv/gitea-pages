@@ -323,6 +323,7 @@ func main() {
 		log.Fatalf("Failed to initialize repository verifier: %v", err)
 	}
 	deployer := NewWebhookDeployer(config, tokenStore, repositoryVerifier, NewDeploymentService(config))
+	deployer.SetCommitStatusReporter(NewGiteaCommitStatusReporter(config.GiteaAPIURL))
 
 	// Initialize web handler
 	webHandler := NewWebHandler(nil, tokenStore, config.Domain, string(config.SessionSecret))

@@ -26,6 +26,20 @@ type recordingDeployments struct {
 	removeErr   error
 }
 
+type recordingStatusReporter struct {
+	mu   sync.Mutex
+	repo VerifiedRepository
+	sha  string
+	n    int
+}
+
+func (r *recordingStatusReporter) ReportDeploymentSuccess(_ context.Context, repo VerifiedRepository, sha string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.repo, r.sha, r.n = repo, sha, r.n+1
+	return nil
+}
+
 func (d *recordingDeployments) Deploy(_ context.Context, repo VerifiedRepository, target SiteTarget) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -146,6 +160,22 @@ func TestHandleWebhookDeploysCanonicalRepositoryAndIgnoresPayloadCloneURL(t *tes
 	}
 	if got := fixture.deployments.deployments[0].CloneURL.String(); got == "https://attacker.example/steal.git" {
 		t.Fatalf("deployment accepted the payload clone URL %q", got)
+	}
+}
+
+func TestHandleWebhookReportsSuccessfulDeploymentStatus(t *testing.T) {
+	principal := HookPrincipal{Username: "alice", ScopeType: ScopeUser, ScopeName: "alice"}
+	fixture := newWebhookHandlerFixture(t, principal, canonicalRepository(7, "alice", "site", "", true))
+	reporter := &recordingStatusReporter{}
+	fixture.deployer.SetCommitStatusReporter(reporter)
+	body := webhookBody(t, "refs/heads/gh-pages", "abc123", "alice", "site", 7, "")
+
+	response := dispatchWebhook(t, fixture.deployer, signedHookRequest(body, fixture.credential.Key, fixture.credential.Secret, "delivery-status"), "push")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if reporter.n != 1 || reporter.sha != "abc123" || reporter.repo.Name != "site" {
+		t.Fatalf("status report = %#v, want one report for site@abc123", reporter)
 	}
 }
 

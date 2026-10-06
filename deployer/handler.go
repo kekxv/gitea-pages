@@ -17,12 +17,26 @@ type DeploymentExecutor interface {
 	Remove(context.Context, SiteTarget) error
 }
 
+// CommitStatusReporter publishes the result after the site is fully deployed.
+type CommitStatusReporter interface {
+	ReportDeploymentSuccess(context.Context, VerifiedRepository, string) error
+}
+
 // Deployer handles authenticated webhook requests and deployment.
 type Deployer struct {
 	config             *Config
 	hookStore          HookStore
 	repositoryVerifier RepositoryVerifier
 	deployments        DeploymentExecutor
+	statusReporter     CommitStatusReporter
+}
+
+// SetCommitStatusReporter enables best-effort CI status reporting. It is a
+// setter to keep existing embedders and tests source-compatible.
+func (d *Deployer) SetCommitStatusReporter(reporter CommitStatusReporter) {
+	if d != nil {
+		d.statusReporter = reporter
+	}
 }
 
 // NewWebhookDeployer constructs the post-migration webhook handler. Its
@@ -100,6 +114,12 @@ func (d *Deployer) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		err = d.deployments.Remove(r.Context(), target)
 	} else {
 		err = d.deployments.Deploy(r.Context(), *repository, target)
+		if err == nil && d.statusReporter != nil && payload.After != "" {
+			if statusErr := d.statusReporter.ReportDeploymentSuccess(r.Context(), *repository, payload.After); statusErr != nil {
+				// Keep API response bodies and repository metadata out of logs.
+				log.Printf("Commit deployment status update failed")
+			}
+		}
 	}
 	if err != nil {
 		writeWebhookError(w, err)

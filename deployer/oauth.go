@@ -198,7 +198,7 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		authURL = h.config.AuthURL // fallback
 	}
 
-	scopes := []string{"read:user", "write:user", "read:repository"}
+	scopes := []string{"read:user", "write:user", "read:repository", "write:repository"}
 	if !h.config.DisableOrganizationHooks {
 		scopes = append(scopes, "write:organization")
 	}

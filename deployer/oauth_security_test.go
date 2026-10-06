@@ -58,7 +58,7 @@ func TestAuthorizeUsesConfiguredRedirectAndEncodedQuery(t *testing.T) {
 	if got, want := location.Query().Get("client_id"), "client id&value"; got != want {
 		t.Errorf("client_id = %q, want %q", got, want)
 	}
-	if got, want := location.Query().Get("scope"), "read:user write:user read:repository write:organization"; got != want {
+	if got, want := location.Query().Get("scope"), "read:user write:user read:repository write:repository write:organization"; got != want {
 		t.Errorf("scope = %q, want %q", got, want)
 	}
 }

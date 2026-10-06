@@ -1,10 +1,36 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestGiteaClient_CreateCommitStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/repos/Alice/Site/statuses/abc123" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer token" {
+			t.Fatalf("authorization header missing")
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["state"] != "success" || body["context"] != deploymentStatusContext {
+			t.Fatalf("status body = %#v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	if err := NewGiteaClient(server.URL, "token").CreateCommitStatus(context.Background(), "Alice", "Site", "abc123", ""); err != nil {
+		t.Fatalf("CreateCommitStatus: %v", err)
+	}
+}
 
 func TestIsTrustedCloneURL(t *testing.T) {
 	trustedAPI := "https://gitea.example.com/api/v1"

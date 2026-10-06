@@ -98,6 +98,7 @@ When users authorize Gitea Pages, the following permissions are requested:
 | Read User Info | `read:user` | Get username to identify site ownership |
 | Manage User Settings | `write:user` | Register a personal-scope webhook |
 | Read Repositories | `read:repository` | Clone repository code for deployment |
+| Update Repository Statuses | `write:repository` | Report successful Pages deployments on commits |
 | Manage Organization Webhooks | `write:organization` | Automatically register organization hooks through the approved administrator token pool |
 
 Users can revoke authorization anytime in Gitea **Settings → Applications → OAuth2 Applications**.
@@ -345,6 +346,7 @@ PAGES_GITEA_PUBLIC_URL=https://gitea.example.com
 | 读取用户信息 | `read:user` | 获取用户名以标识站点所有权 |
 | 管理用户设置 | `write:user` | 注册个人范围的 webhook |
 | 读取仓库 | `read:repository` | 克隆仓库代码进行部署 |
+| 更新仓库状态 | `write:repository` | 在提交上报告 Pages 部署成功状态 |
 | 管理组织 Webhook | `write:organization` | 通过已批准的管理员 token 池自动注册组织 webhook |
 
 用户可随时在 Gitea **设置 → 应用 → OAuth2 应用** 中撤销授权。
