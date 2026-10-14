@@ -28,13 +28,15 @@ func (t SiteTarget) Path() string { return t.path }
 
 func (t SiteTarget) IsRoot() bool { return t.rootSite }
 
-func validateComponent(kind, value string) (string, error) {
+func validateComponent(kind, value string, preserveCase bool) (string, error) {
 	if value == "." || value == ".." || !giteaPathComponent.MatchString(value) || strings.Contains(value, "..") {
 		return "", fmt.Errorf("%s: %w", kind, ErrInvalidPathComponent)
 	}
-	// Gitea repository and owner names are case-sensitive path components.
-	// Preserve the canonical spelling so `Alice/Site` and `alice/site` remain
-	// distinct deployments, matching GitHub Pages behavior.
+	if !preserveCase {
+		return strings.ToLower(value), nil
+	}
+	// Repository names are case-sensitive. Preserve their canonical spelling
+	// so `Site` and `site` remain distinct deployments.
 	return value, nil
 }
 
@@ -45,15 +47,15 @@ func NewSiteTarget(root, owner, repo, domain string) (SiteTarget, error) {
 	if err != nil {
 		return SiteTarget{}, fmt.Errorf("resolve pages root: %w", err)
 	}
-	owner, err = validateComponent("owner", owner)
+	owner, err = validateComponent("owner", owner, false)
 	if err != nil {
 		return SiteTarget{}, err
 	}
-	repo, err = validateComponent("repository", repo)
+	repo, err = validateComponent("repository", repo, true)
 	if err != nil {
 		return SiteTarget{}, err
 	}
-	domain, err = validateComponent("domain", domain)
+	domain, err = validateComponent("domain", domain, false)
 	if err != nil {
 		return SiteTarget{}, err
 	}
@@ -62,7 +64,7 @@ func NewSiteTarget(root, owner, repo, domain string) (SiteTarget, error) {
 	// account root site. A similarly named foreign domain must never create a
 	// second destructive path below the same owner directory.
 	rootRepository := owner + "." + domain
-	if strings.HasPrefix(repo, owner+".pages.") && repo != rootRepository {
+	if strings.HasPrefix(strings.ToLower(repo), owner+".pages.") && strings.ToLower(repo) != rootRepository {
 		return SiteTarget{}, fmt.Errorf("repository: %w", ErrInvalidPathComponent)
 	}
 

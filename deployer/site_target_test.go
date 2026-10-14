@@ -48,7 +48,7 @@ func TestRootRepositoryMatchIsExact(t *testing.T) {
 
 func TestNewSiteTargetUsesOnlyExactRootRepositoryNames(t *testing.T) {
 	root := t.TempDir()
-	for _, repo := range []string{"Alice", "Alice.Example.COM"} {
+	for _, repo := range []string{"alice", "alice.example.com"} {
 		target, err := NewSiteTarget(root, "Alice", repo, "Example.COM")
 		if err != nil {
 			t.Fatalf("NewSiteTarget(%q): %v", repo, err)
@@ -56,9 +56,26 @@ func TestNewSiteTargetUsesOnlyExactRootRepositoryNames(t *testing.T) {
 		if !target.IsRoot() {
 			t.Fatalf("repository %q did not select the root site", repo)
 		}
-		if got, want := target.Path(), filepath.Join(root, "Alice", "_root"); got != want {
+		if got, want := target.Path(), filepath.Join(root, "alice", "_root"); got != want {
 			t.Fatalf("target path = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestNewSiteTargetNormalizesOwnerAndDomainButPreservesRepositoryCase(t *testing.T) {
+	target, err := NewSiteTarget(t.TempDir(), "Alice", "Site", "Example.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := target.Path(), filepath.Join(target.root, "alice", "Site"); got != want {
+		t.Fatalf("target path = %q, want %q", got, want)
+	}
+	other, err := NewSiteTarget(target.root, "alice", "site", "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := other.Path(), filepath.Join(target.root, "alice", "site"); got != want {
+		t.Fatalf("case-sensitive repository path = %q, want %q", got, want)
 	}
 }
 
